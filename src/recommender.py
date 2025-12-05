@@ -21,6 +21,60 @@ from pyspark.sql.types import DoubleType
 import math
 
 
+# Import embedding and topic similarity functions
+# Import inside UDFs to avoid serialization issues
+def _compute_embedding_similarity(embedding1, embedding2):
+    """Compute cosine similarity between two embeddings (inline to avoid import issues)."""
+    import numpy as np
+
+    if not embedding1 or not embedding2:
+        return 0.0
+
+    try:
+        vec1 = np.array(embedding1)
+        vec2 = np.array(embedding2)
+
+        dot_product = np.dot(vec1, vec2)
+        norm1 = np.linalg.norm(vec1)
+        norm2 = np.linalg.norm(vec2)
+
+        if norm1 == 0 or norm2 == 0:
+            return 0.0
+
+        similarity = dot_product / (norm1 * norm2)
+        return float((similarity + 1) / 2.0)
+    except Exception:
+        return 0.0
+
+
+def _compute_topic_similarity(topics1, topics2):
+    """Compute cosine similarity between two topic distributions (inline to avoid import issues)."""
+    import numpy as np
+
+    if not topics1 or not topics2:
+        return 0.0
+
+    try:
+        vec1 = np.array(topics1)
+        vec2 = np.array(topics2)
+
+        min_len = min(len(vec1), len(vec2))
+        vec1 = vec1[:min_len]
+        vec2 = vec2[:min_len]
+
+        dot_product = np.dot(vec1, vec2)
+        norm1 = np.linalg.norm(vec1)
+        norm2 = np.linalg.norm(vec2)
+
+        if norm1 == 0 or norm2 == 0:
+            return 0.0
+
+        similarity = dot_product / (norm1 * norm2)
+        return float(similarity)
+    except Exception:
+        return 0.0
+
+
 def compute_trajectory_similarity(traj1, traj2):
     """
     Compute similarity between two emotion trajectories.
@@ -375,28 +429,187 @@ def compute_feature_similarity(
     return feature_sim_df
 
 
+def compute_embedding_similarity_df(
+    spark: SparkSession,
+    trajectory_df,
+    liked_book_id: str,
+):
+    """
+    Compute embedding-based similarity for all books compared to the liked book.
+
+    Args:
+        spark: SparkSession
+        trajectory_df: DataFrame with book trajectories (must have book_embedding column)
+        liked_book_id: Book ID that user likes
+
+    Returns:
+        DataFrame with embedding_similarity column
+    """
+    if "book_embedding" not in trajectory_df.columns:
+        return spark.createDataFrame(
+            [], trajectory_df.schema.add("embedding_similarity", DoubleType())
+        )
+
+    # Get liked book embedding
+    liked_book = trajectory_df.filter(col("book_id") == liked_book_id).collect()
+    if not liked_book:
+        return spark.createDataFrame(
+            [], trajectory_df.schema.add("embedding_similarity", DoubleType())
+        )
+
+    liked_row = liked_book[0]
+    # Handle both dict-like and Row objects
+    try:
+        liked_embedding = (
+            liked_row.get("book_embedding")
+            if hasattr(liked_row, "get")
+            else liked_row["book_embedding"]
+        )
+    except (KeyError, AttributeError):
+        liked_embedding = None
+
+    if liked_embedding is None:
+        return spark.createDataFrame(
+            [], trajectory_df.schema.add("embedding_similarity", DoubleType())
+        )
+
+    # Compute embedding similarity for all books
+    # Define similarity function inline to avoid module import issues
+    def embedding_sim_func(emb):
+        import numpy as np
+
+        if not liked_embedding or not emb:
+            return 0.0
+        try:
+            vec1 = np.array(liked_embedding)
+            vec2 = np.array(emb)
+            dot_product = np.dot(vec1, vec2)
+            norm1 = np.linalg.norm(vec1)
+            norm2 = np.linalg.norm(vec2)
+            if norm1 == 0 or norm2 == 0:
+                return 0.0
+            similarity = dot_product / (norm1 * norm2)
+            return float((similarity + 1) / 2.0)
+        except Exception:
+            return 0.0
+
+    embedding_sim_udf = udf(embedding_sim_func, DoubleType())
+
+    embedding_sim_df = (
+        trajectory_df.filter(col("book_id") != liked_book_id)
+        .withColumn("embedding_similarity", embedding_sim_udf(col("book_embedding")))
+        .select("book_id", "embedding_similarity")
+    )
+
+    return embedding_sim_df
+
+
+def compute_topic_similarity_df(
+    spark: SparkSession,
+    trajectory_df,
+    liked_book_id: str,
+):
+    """
+    Compute topic-based similarity for all books compared to the liked book.
+
+    Args:
+        spark: SparkSession
+        trajectory_df: DataFrame with book trajectories (must have book_topics column)
+        liked_book_id: Book ID that user likes
+
+    Returns:
+        DataFrame with topic_similarity column
+    """
+    if "book_topics" not in trajectory_df.columns:
+        return spark.createDataFrame(
+            [], trajectory_df.schema.add("topic_similarity", DoubleType())
+        )
+
+    # Get liked book topics
+    liked_book = trajectory_df.filter(col("book_id") == liked_book_id).collect()
+    if not liked_book:
+        return spark.createDataFrame(
+            [], trajectory_df.schema.add("topic_similarity", DoubleType())
+        )
+
+    liked_row = liked_book[0]
+    # Handle both dict-like and Row objects
+    try:
+        liked_topics = (
+            liked_row.get("book_topics")
+            if hasattr(liked_row, "get")
+            else liked_row["book_topics"]
+        )
+    except (KeyError, AttributeError):
+        liked_topics = None
+
+    if liked_topics is None:
+        return spark.createDataFrame(
+            [], trajectory_df.schema.add("topic_similarity", DoubleType())
+        )
+
+    # Compute topic similarity for all books
+    # Define similarity function inline to avoid module import issues
+    def topic_sim_func(topics):
+        import numpy as np
+
+        if not liked_topics or not topics:
+            return 0.0
+        try:
+            vec1 = np.array(liked_topics)
+            vec2 = np.array(topics)
+            min_len = min(len(vec1), len(vec2))
+            vec1 = vec1[:min_len]
+            vec2 = vec2[:min_len]
+            dot_product = np.dot(vec1, vec2)
+            norm1 = np.linalg.norm(vec1)
+            norm2 = np.linalg.norm(vec2)
+            if norm1 == 0 or norm2 == 0:
+                return 0.0
+            similarity = dot_product / (norm1 * norm2)
+            return float(similarity)
+        except Exception:
+            return 0.0
+
+    topic_sim_udf = udf(topic_sim_func, DoubleType())
+
+    topic_sim_df = (
+        trajectory_df.filter(col("book_id") != liked_book_id)
+        .withColumn("topic_similarity", topic_sim_udf(col("book_topics")))
+        .select("book_id", "topic_similarity")
+    )
+
+    return topic_sim_df
+
+
 def recommend(
     spark: SparkSession,
     trajectory_df,
     liked_book_id: str,
     top_n: int = 10,
-    feature_weight: float = 0.6,
-    trajectory_weight: float = 0.4,
+    feature_weight: float = 0.4,
+    trajectory_weight: float = 0.2,
+    embedding_weight: float = 0.2,
+    topic_weight: float = 0.2,
 ):
     """
     Recommend books with similar emotion trajectories.
 
-    Combines feature-based similarity (11 aggregated features) and trajectory similarity
-    (emotion sequences) when available. Falls back to feature-based only when trajectory
-    arrays are not available.
+    Combines multiple similarity metrics:
+    - Feature-based similarity (emotion and VAD features)
+    - Trajectory similarity (emotion sequences)
+    - Embedding similarity (semantic word embeddings)
+    - Topic similarity (LDA topic distributions)
 
     Args:
         spark: SparkSession
         trajectory_df: DataFrame with book trajectories
         liked_book_id: Book ID that user likes
         top_n: Number of recommendations
-        feature_weight: Weight for feature-based similarity (default: 0.6)
-        trajectory_weight: Weight for trajectory similarity (default: 0.4)
+        feature_weight: Weight for feature-based similarity (default: 0.4)
+        trajectory_weight: Weight for trajectory similarity (default: 0.2)
+        embedding_weight: Weight for embedding similarity (default: 0.2)
+        topic_weight: Weight for topic similarity (default: 0.2)
         Note: weights are normalized to sum to 1.0
 
     Returns:
@@ -411,10 +624,12 @@ def recommend(
     )
 
     # Normalize weights
-    total_weight = feature_weight + trajectory_weight
+    total_weight = feature_weight + trajectory_weight + embedding_weight + topic_weight
     if total_weight > 0:
         feature_weight = feature_weight / total_weight
         trajectory_weight = trajectory_weight / total_weight
+        embedding_weight = embedding_weight / total_weight
+        topic_weight = topic_weight / total_weight
 
     # Get liked book
     liked_book = trajectory_df.filter(col("book_id") == liked_book_id).collect()
@@ -433,15 +648,16 @@ def recommend(
     # Compute feature-based similarity (always available)
     feature_sim_df = compute_feature_similarity(spark, trajectory_df, liked_book_id)
 
+    # Start with feature similarity as base
+    combined_df = feature_sim_df
+
     # Compute trajectory similarity if available
     if has_trajectory and "emotion_trajectory" in trajectory_df.columns:
-        # Check if other books also have trajectories
         other_books_with_traj = trajectory_df.filter(
             (col("book_id") != liked_book_id) & (col("emotion_trajectory").isNotNull())
         )
 
         if other_books_with_traj.count() > 0:
-            # Compute trajectory similarity for all books
             similarity_udf = udf(
                 lambda traj: compute_trajectory_similarity(
                     liked_row["emotion_trajectory"], traj
@@ -459,28 +675,47 @@ def recommend(
                 .select("book_id", "trajectory_similarity")
             )
 
-            # Join feature and trajectory similarities
-            combined_df = feature_sim_df.join(
-                trajectory_sim_df, on="book_id", how="outer"
-            )
-
-            # Fill missing trajectory similarity with 0 (when trajectory arrays not available)
+            combined_df = combined_df.join(trajectory_sim_df, on="book_id", how="outer")
             combined_df = combined_df.fillna(0.0, subset=["trajectory_similarity"])
 
-            # Compute combined similarity: weighted average
-            combined_df = combined_df.withColumn(
-                "similarity",
-                (feature_weight * col("feature_similarity"))
-                + (trajectory_weight * col("trajectory_similarity")),
-            )
-        else:
-            # No other books have trajectories, use only feature-based
-            combined_df = feature_sim_df.withColumn(
-                "similarity", col("feature_similarity")
-            )
-    else:
-        # No trajectory data available, use only feature-based
-        combined_df = feature_sim_df.withColumn("similarity", col("feature_similarity"))
+    # Compute embedding similarity if available
+    if "book_embedding" in trajectory_df.columns:
+        embedding_sim_df = compute_embedding_similarity_df(
+            spark, trajectory_df, liked_book_id
+        )
+        if embedding_sim_df.count() > 0:
+            combined_df = combined_df.join(embedding_sim_df, on="book_id", how="outer")
+            combined_df = combined_df.fillna(0.0, subset=["embedding_similarity"])
+
+    # Compute topic similarity if available
+    if "book_topics" in trajectory_df.columns:
+        topic_sim_df = compute_topic_similarity_df(spark, trajectory_df, liked_book_id)
+        if topic_sim_df.count() > 0:
+            combined_df = combined_df.join(topic_sim_df, on="book_id", how="outer")
+            combined_df = combined_df.fillna(0.0, subset=["topic_similarity"])
+
+    # Compute combined similarity: weighted average of all available metrics
+    # Start with feature similarity as base
+    similarity_expr = feature_weight * col("feature_similarity")
+
+    # Add trajectory similarity if available
+    if "trajectory_similarity" in combined_df.columns:
+        similarity_expr = similarity_expr + (
+            trajectory_weight * col("trajectory_similarity")
+        )
+
+    # Add embedding similarity if available
+    if "embedding_similarity" in combined_df.columns:
+        similarity_expr = similarity_expr + (
+            embedding_weight * col("embedding_similarity")
+        )
+
+    # Add topic similarity if available
+    if "topic_similarity" in combined_df.columns:
+        similarity_expr = similarity_expr + (topic_weight * col("topic_similarity"))
+
+    # Compute final similarity
+    combined_df = combined_df.withColumn("similarity", similarity_expr)
 
     # Select final columns and order by similarity
     result = (

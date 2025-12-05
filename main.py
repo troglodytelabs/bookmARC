@@ -18,6 +18,17 @@ from emotion_scorer import (
     combine_emotion_vad_scores,
 )
 from trajectory_analyzer import analyze_trajectory
+from word_embeddings import (
+    train_word2vec,
+    compute_chunk_embeddings,
+    compute_book_embedding,
+)
+from topic_modeling import (
+    prepare_topic_features,
+    train_lda,
+    get_chunk_topics,
+    compute_book_topics,
+)
 
 
 def create_spark_session(app_name: str = "EmoArc"):
@@ -67,6 +78,28 @@ def main():
         "--output", default="output", help="Output directory for results"
     )
     parser.add_argument("--language", default="en", help="Filter books by language")
+    parser.add_argument(
+        "--vector-size",
+        type=int,
+        default=100,
+        help="Word2Vec vector size (default: 100)",
+    )
+    parser.add_argument(
+        "--num-topics",
+        type=int,
+        default=10,
+        help="Number of LDA topics (default: 10)",
+    )
+    parser.add_argument(
+        "--skip-embeddings",
+        action="store_true",
+        help="Skip word embeddings computation",
+    )
+    parser.add_argument(
+        "--skip-topics",
+        action="store_true",
+        help="Skip topic modeling",
+    )
 
     args = parser.parse_args()
 
@@ -115,13 +148,66 @@ def main():
         chunk_scores = combine_emotion_vad_scores(emotion_scores, vad_scores)
 
         # Step 6: Analyze trajectories
-        print("\n[Step 6/6] Analyzing emotion trajectories...")
+        print("\n[Step 6/8] Analyzing emotion trajectories...")
         trajectories = analyze_trajectory(spark, chunk_scores)
         
         # Filter out books with no chunks (shouldn't happen, but safety check)
         trajectories = trajectories.filter(col("num_chunks") > 0)
         trajectory_count = trajectories.count()
         print(f"  ✓ Analyzed {trajectory_count} book trajectories")
+
+        # Step 7: Compute word embeddings
+        book_embeddings = None
+        if not args.skip_embeddings:
+            print("\n[Step 7/8] Computing word embeddings...")
+            print("  Training Word2Vec model...")
+            word2vec_model = train_word2vec(
+                spark, chunks_df, vector_size=args.vector_size, min_count=5
+            )
+            print("  ✓ Word2Vec model trained")
+            
+            print("  Computing chunk embeddings...")
+            chunk_embeddings = compute_chunk_embeddings(spark, chunks_df, word2vec_model)
+            print(f"  ✓ Computed embeddings for {chunk_embeddings.count()} chunks")
+            
+            print("  Computing book-level embeddings...")
+            book_embeddings = compute_book_embedding(spark, chunk_embeddings)
+            print(f"  ✓ Computed embeddings for {book_embeddings.count()} books")
+        else:
+            print("\n[Step 7/8] Skipping word embeddings (--skip-embeddings)")
+
+        # Step 8: Compute topic distributions
+        book_topics = None
+        if not args.skip_topics:
+            print("\n[Step 8/8] Computing topic distributions...")
+            print("  Preparing topic features...")
+            feature_df, cv_model = prepare_topic_features(
+                spark, chunks_df, vocab_size=5000, min_df=2
+            )
+            print("  ✓ Features prepared")
+            
+            print(f"  Training LDA model with {args.num_topics} topics...")
+            lda_model = train_lda(spark, feature_df, num_topics=args.num_topics, max_iter=50)
+            print("  ✓ LDA model trained")
+            
+            print("  Computing chunk topics...")
+            chunk_topics = get_chunk_topics(spark, feature_df, lda_model)
+            print(f"  ✓ Computed topics for {chunk_topics.count()} chunks")
+            
+            print("  Computing book-level topics...")
+            book_topics = compute_book_topics(spark, chunk_topics)
+            print(f"  ✓ Computed topics for {book_topics.count()} books")
+        else:
+            print("\n[Step 8/8] Skipping topic modeling (--skip-topics)")
+
+        # Join embeddings and topics with trajectories
+        if book_embeddings is not None:
+            trajectories = trajectories.join(book_embeddings, on="book_id", how="left")
+            print("  ✓ Joined embeddings with trajectories")
+        
+        if book_topics is not None:
+            trajectories = trajectories.join(book_topics, on="book_id", how="left")
+            print("  ✓ Joined topics with trajectories")
         
         if args.limit and trajectory_count < args.limit:
             print(f"  ⚠ Warning: Expected {args.limit} books but got {trajectory_count}")
@@ -135,9 +221,15 @@ def main():
             f"{args.output}/chunk_scores"
         )
 
-        # Remove emotion_trajectory column (array type not supported by CSV)
-        # It can be recomputed if needed, and we have all the stats we need
-        trajectories_for_csv = trajectories.drop("emotion_trajectory")
+        # Remove array columns (not supported by CSV)
+        # These can be recomputed if needed
+        columns_to_drop = ["emotion_trajectory"]
+        if "book_embedding" in trajectories.columns:
+            columns_to_drop.append("book_embedding")
+        if "book_topics" in trajectories.columns:
+            columns_to_drop.append("book_topics")
+        
+        trajectories_for_csv = trajectories.drop(*columns_to_drop)
         trajectories_for_csv.coalesce(1).write.mode("overwrite").option(
             "header", "true"
         ).csv(f"{args.output}/trajectories")
