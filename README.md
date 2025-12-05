@@ -30,6 +30,7 @@ emoArc/
 │   └── NRC-VAD-Lexicon-v2.1.txt  # Download from NRC website
 ├── main.py                    # Main pipeline script
 ├── demo.py                    # Demo script for presentations
+├── app.py                     # Streamlit web application
 ├── pyproject.toml            # Project dependencies
 └── README.md
 ```
@@ -129,6 +130,54 @@ This will:
 - Display top 10 recommendations with similarity scores
 - Save results to CSV
 
+### Step 3: Interactive Web Application (app.py)
+
+For a user-friendly web interface, use the Streamlit app:
+
+```bash
+streamlit run app.py
+```
+
+This will open a web browser at `http://localhost:8501` with an interactive interface.
+
+#### Features:
+
+1. **Book Analysis & Recommendations**:
+
+   - Search books by title (partial match supported)
+   - Enter book ID directly
+   - Upload text files for analysis
+   - View interactive emotion trajectory plots
+   - See emotion statistics and trajectory summaries
+   - Automatically get book recommendations based on emotion similarity
+
+2. **Explore Books**:
+
+   - Discover top books by emotion characteristics (Joy, Sadness, Fear, etc.)
+   - Browse books ranked by specific emotions
+
+3. **Interactive Visualizations**:
+   - Plotly-based interactive charts
+   - Zoom, pan, and hover for detailed exploration
+   - Toggle emotions on/off in the legend
+   - Download plots as PNG
+
+#### Usage:
+
+1. **Search and Analyze**:
+
+   - Select input method (Search by Title, Enter Book ID, or Upload Text File)
+   - If trajectories are available, adjust the number of recommendations (5-20)
+   - Click "Analyze Book & Get Recommendations"
+   - View analysis results and recommendations in one place
+
+2. **Explore by Emotion**:
+   - Select an emotion from the dropdown
+   - Choose number of books to display (10-50)
+   - Click "Show Top Books" to see rankings
+
+**Note**: The app requires trajectories from `main.py` for recommendations. Run `python main.py` first to generate trajectories.
+
 ### Command Line Options
 
 **main.py options:**
@@ -150,6 +199,12 @@ This will:
 - `--recommend`: Get recommendations based on input
 - `--limit`: Limit number of books to consider for recommendations (optional)
 - `--output-dir`: Directory with output from main.py (default: `output`)
+
+**app.py (Streamlit app):**
+
+- No command-line options needed - all configuration is done through the web interface
+- Automatically uses `output/` directory for trajectories
+- Supports all input methods through the UI
 
 ## How It Works
 
@@ -240,6 +295,7 @@ The pipeline generates:
 1. **chunk_scores/**: CSV files with emotion and VAD scores per chunk
 2. **trajectories/**: CSV files with aggregated trajectory statistics per book
 3. **demo_output/**: Visualization plots and recommendation CSVs (from demo.py)
+4. **Streamlit app**: Interactive web interface for analysis and recommendations (from app.py)
 
 ## Example Output
 
