@@ -50,16 +50,7 @@ emoArc/
 uv sync
 ```
 
-2. Download NLTK data (done automatically on first run):
-
-```python
-import nltk
-nltk.download('punkt')
-nltk.download('stopwords')
-nltk.download('wordnet')
-```
-
-3. Download NRC Lexicons:
+2. Download NRC Lexicons:
 
    Place the following files in the `data/` directory:
 
@@ -291,11 +282,3 @@ Top 10 Recommendations for "Alice's Adventures in Wonderland":
 - Processing 75,000 books may take several hours
 - Use `--limit` for testing and demos
 - Results are saved to output directory for reuse
-
-## Future Enhancements
-
-- [ ] Real-time recommendation API
-- [ ] Interactive visualization dashboard
-- [ ] Multi-language support
-- [ ] Advanced trajectory pattern recognition
-- [ ] User preference learning
