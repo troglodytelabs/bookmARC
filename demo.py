@@ -118,20 +118,48 @@ def create_spark_session():
 
 def plot_emotion_trajectory(chunk_scores_pd, book_title, output_path):
     """Plot emotion trajectory for a book."""
-    fig, axes = plt.subplots(2, 1, figsize=(12, 8))
+    fig, axes = plt.subplots(2, 1, figsize=(14, 10))
 
     # Plot 1: Emotion scores over chunks
-    emotions = ["joy", "sadness", "fear", "anger"]
-    colors = ["green", "blue", "red", "orange"]
+    # Use all 8 Plutchik emotions
+    emotions = [
+        "anger",
+        "anticipation",
+        "disgust",
+        "fear",
+        "joy",
+        "sadness",
+        "surprise",
+        "trust",
+    ]
+    # Distinct colors for each emotion
+    colors = [
+        "red",  # anger
+        "orange",  # anticipation
+        "brown",  # disgust
+        "black",  # fear
+        "gold",  # joy
+        "blue",  # sadness
+        "purple",  # surprise
+        "green",  # trust
+    ]
 
+    has_data = False
     for emotion, color in zip(emotions, colors):
         if emotion in chunk_scores_pd.columns:
+            # Check if there's any non-zero data to plot
+            if chunk_scores_pd[emotion].any():
+                has_data = True
+
             axes[0].plot(
                 chunk_scores_pd["chunk_index"],
                 chunk_scores_pd[emotion],
                 label=emotion.capitalize(),
                 color=color,
                 linewidth=2,
+                alpha=0.7,
+                marker="o",
+                markersize=4,
             )
 
     axes[0].set_xlabel("Chunk Index", fontsize=12)
@@ -139,25 +167,59 @@ def plot_emotion_trajectory(chunk_scores_pd, book_title, output_path):
     axes[0].set_title(
         f"Emotion Trajectory: {book_title}", fontsize=14, fontweight="bold"
     )
-    axes[0].legend()
+    if has_data:
+        axes[0].legend(loc="upper right", bbox_to_anchor=(1.15, 1))
+    else:
+        axes[0].text(
+            0.5,
+            0.5,
+            "No Emotion Data Available",
+            ha="center",
+            va="center",
+            transform=axes[0].transAxes,
+        )
     axes[0].grid(True, alpha=0.3)
 
     # Plot 2: VAD scores
+    vad_has_data = False
     if "avg_valence" in chunk_scores_pd.columns:
+        if chunk_scores_pd["avg_valence"].any():
+            vad_has_data = True
         axes[1].plot(
             chunk_scores_pd["chunk_index"],
             chunk_scores_pd["avg_valence"],
             label="Valence",
             color="purple",
             linewidth=2,
+            linestyle="-",
+            marker="o",
+            markersize=4,
         )
     if "avg_arousal" in chunk_scores_pd.columns:
+        if chunk_scores_pd["avg_arousal"].any():
+            vad_has_data = True
         axes[1].plot(
             chunk_scores_pd["chunk_index"],
             chunk_scores_pd["avg_arousal"],
             label="Arousal",
-            color="brown",
+            color="orange",
             linewidth=2,
+            linestyle="--",
+            marker="o",
+            markersize=4,
+        )
+    if "avg_dominance" in chunk_scores_pd.columns:
+        if chunk_scores_pd["avg_dominance"].any():
+            vad_has_data = True
+        axes[1].plot(
+            chunk_scores_pd["chunk_index"],
+            chunk_scores_pd["avg_dominance"],
+            label="Dominance",
+            color="green",
+            linewidth=2,
+            linestyle=":",
+            marker="o",
+            markersize=4,
         )
 
     axes[1].set_xlabel("Chunk Index", fontsize=12)
@@ -165,7 +227,17 @@ def plot_emotion_trajectory(chunk_scores_pd, book_title, output_path):
     axes[1].set_title(
         "Valence-Arousal-Dominance Trajectory", fontsize=14, fontweight="bold"
     )
-    axes[1].legend()
+    if vad_has_data:
+        axes[1].legend(loc="upper right", bbox_to_anchor=(1.15, 1))
+    else:
+        axes[1].text(
+            0.5,
+            0.5,
+            "No VAD Data Available",
+            ha="center",
+            va="center",
+            transform=axes[1].transAxes,
+        )
     axes[1].grid(True, alpha=0.3)
 
     plt.tight_layout()
@@ -225,7 +297,15 @@ def get_input_trajectory(
             )
 
             print("    Creating chunks...")
-            chunks_df = create_chunks_df(spark, books_df, chunk_size=10000)
+            # Adjust chunk size for small text
+            text_len = len(text)
+            chunk_size = 10000
+            if text_len < 20000:
+                chunk_size = max(100, text_len // 10)
+                print(
+                    f"    Adjusting chunk size to {chunk_size} for small text ({text_len} chars)..."
+                )
+            chunks_df = create_chunks_df(spark, books_df, chunk_size=chunk_size)
 
             print("    Scoring chunks...")
             emotion_scores = score_chunks_with_emotions(spark, chunks_df, emotion_df)
@@ -351,7 +431,15 @@ def get_input_trajectory(
             print(f"    Author: {author}")
 
             print("    Creating chunks...")
-            chunks_df = create_chunks_df(spark, books_df, chunk_size=10000)
+            # Adjust chunk size for small text
+            text_len = len(book_text)
+            chunk_size = 10000
+            if text_len < 20000:
+                chunk_size = max(100, text_len // 10)
+                print(
+                    f"    Adjusting chunk size to {chunk_size} for small book ({text_len} chars)..."
+                )
+            chunks_df = create_chunks_df(spark, books_df, chunk_size=chunk_size)
 
             print("    Scoring chunks...")
             emotion_scores = score_chunks_with_emotions(spark, chunks_df, emotion_df)
@@ -538,7 +626,12 @@ def demo_recommendations(
 
     # Save to CSV
     os.makedirs("demo_output", exist_ok=True)
+
+    # Use generic name or filename
     rec_id = str(liked_id).replace("/", "_").replace("\\", "_")
+    if rec_id == "text_file" and text_file:
+        rec_id = os.path.basename(text_file).replace(".txt", "").replace("_", " ")
+
     recs_pd.to_csv(f"demo_output/recommendations_for_{rec_id}.csv", index=False)
     print(f"  ✓ Saved recommendations to demo_output/recommendations_for_{rec_id}.csv")
 
