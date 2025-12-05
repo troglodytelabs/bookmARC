@@ -28,7 +28,7 @@ from emotion_scorer import (
     combine_emotion_vad_scores,
 )
 from trajectory_analyzer import analyze_trajectory
-from recommender import recommend_by_features
+from recommender import recommend
 
 
 def load_trajectories_with_types(spark, trajectories_path):
@@ -511,7 +511,8 @@ def demo_recommendations(
         liked_trajectory_aligned = liked_trajectory.select(*common_cols)
         all_trajectories = trajectories_aligned.union(liked_trajectory_aligned)
 
-    recommendations = recommend_by_features(spark, all_trajectories, liked_id, top_n=10)
+    # Get recommendations (combines feature-based + trajectory similarity when available)
+    recommendations = recommend(spark, all_trajectories, liked_id, top_n=10)
 
     # Display recommendations
     print("\n  Top 10 Recommendations:")

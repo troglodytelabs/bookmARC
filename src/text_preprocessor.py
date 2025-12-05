@@ -14,56 +14,12 @@ from pyspark.sql.types import (
 import re
 import nltk
 
-# Download required NLTK data
-try:
-    nltk.data.find("tokenizers/punkt")
-except LookupError:
-    nltk.download("punkt", quiet=True)
-
+# Download required NLTK data (stopwords are downloaded inside UDF if needed)
+# Module-level download ensures availability before UDF execution
 try:
     nltk.data.find("corpora/stopwords")
 except LookupError:
     nltk.download("stopwords", quiet=True)
-
-try:
-    nltk.data.find("corpora/wordnet")
-except LookupError:
-    nltk.download("wordnet", quiet=True)
-
-
-def chunk_text(text: str, chunk_size: int = 10000) -> list:
-    """
-    Split text into fixed-length chunks.
-
-    Args:
-        text: Input text
-        chunk_size: Size of each chunk in characters
-
-    Returns:
-        List of (chunk_index, chunk_text) tuples
-    """
-    if not text:
-        return []
-
-    chunks = []
-    for i in range(0, len(text), chunk_size):
-        chunk = text[i : i + chunk_size]
-        chunks.append((i // chunk_size, chunk))
-
-    return chunks
-
-
-chunk_text_udf = udf(
-    lambda text: chunk_text(text) if text else [],
-    ArrayType(
-        StructType(
-            [
-                StructField("chunk_index", IntegerType(), True),
-                StructField("chunk_text", StringType(), True),
-            ]
-        )
-    ),
-)
 
 
 def load_books(

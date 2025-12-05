@@ -2,8 +2,17 @@
 Recommendation system based on emotion trajectory similarity.
 """
 
-from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, pow, udf, lit
+from pyspark.sql import SparkSession, Window
+from pyspark.sql.functions import (
+    col,
+    pow,
+    udf,
+    lit,
+    sqrt,
+    min as spark_min,
+    max as spark_max,
+    row_number,
+)
 from pyspark.sql.types import DoubleType
 import math
 
@@ -11,7 +20,7 @@ import math
 def compute_trajectory_similarity(traj1, traj2):
     """
     Compute similarity between two emotion trajectories.
-    Uses cosine similarity or Euclidean distance.
+    Uses cosine similarity.
 
     Args:
         traj1: First trajectory (array of emotion scores)
@@ -46,123 +55,28 @@ def compute_trajectory_similarity(traj1, traj2):
     return float(similarity)
 
 
-def compute_feature_similarity(features1, features2):
-    """
-    Compute similarity based on aggregated features.
-
-    Args:
-        features1: Dict with emotion statistics
-        features2: Dict with emotion statistics
-
-    Returns:
-        Similarity score
-    """
-    # Extract key features
-    feature_names = [
-        "avg_anger",
-        "avg_joy",
-        "avg_fear",
-        "avg_sadness",
-        "avg_valence",
-        "avg_arousal",
-        "avg_dominance",
-        "valence_std",
-        "arousal_std",
-    ]
-
-    similarity = 0.0
-    count = 0
-
-    for feat in feature_names:
-        if feat in features1 and feat in features2:
-            val1 = features1[feat] or 0.0
-            val2 = features2[feat] or 0.0
-            # Use 1 - normalized difference as similarity
-            diff = abs(val1 - val2)
-            max_val = max(abs(val1), abs(val2), 1.0)
-            similarity += 1.0 - (diff / max_val)
-            count += 1
-
-    return similarity / count if count > 0 else 0.0
-
-
-def recommend_books(
-    spark: SparkSession, trajectory_df, liked_book_id: str, top_n: int = 10
+def compute_feature_similarity(
+    spark: SparkSession,
+    trajectory_df,
+    liked_book_id: str,
 ):
     """
-    Recommend books with similar emotion trajectories.
+    Compute feature-based similarity for all books compared to the liked book.
+
+    Uses normalized Euclidean distance on 11 features:
+    - 8 Plutchik emotion averages
+    - 3 VAD scores (valence, arousal, dominance)
 
     Args:
         spark: SparkSession
         trajectory_df: DataFrame with book trajectories
         liked_book_id: Book ID that user likes
-        top_n: Number of recommendations
 
     Returns:
-        DataFrame with recommended books and similarity scores
+        DataFrame with feature_similarity column
     """
-    # Get liked book trajectory
-    liked_book = trajectory_df.filter(col("book_id") == liked_book_id).collect()
-
-    if not liked_book:
-        return spark.createDataFrame([], trajectory_df.schema)
-
-    liked_row = liked_book[0]
-
-    # Compute similarity for all other books
-    similarity_udf = udf(
-        lambda traj: compute_trajectory_similarity(
-            liked_row["emotion_trajectory"], traj
-        ),
-        DoubleType(),
-    )
-
-    # Add similarity scores
-    recommendations = (
-        trajectory_df.filter(col("book_id") != liked_book_id)
-        .withColumn("similarity", similarity_udf(col("emotion_trajectory")))
-        .orderBy(col("similarity").desc())
-        .limit(top_n)
-    )
-
-    return recommendations.select(
-        "book_id",
-        "title",
-        "author",
-        "similarity",
-        "avg_joy",
-        "avg_sadness",
-        "avg_fear",
-        "avg_anger",
-        "avg_valence",
-        "avg_arousal",
-    )
-
-
-def recommend_by_features(
-    spark: SparkSession, trajectory_df, liked_book_id: str, top_n: int = 10
-):
-    """
-    Recommend books based on aggregated feature similarity.
-    This is faster than trajectory similarity.
-
-    Uses normalized Euclidean distance for similarity.
-    Features are normalized to 0-1 range to handle different scales.
-
-    Args:
-        spark: SparkSession
-        trajectory_df: DataFrame with book trajectories
-        liked_book_id: Book ID that user likes
-        top_n: Number of recommendations
-
-    Returns:
-        DataFrame with recommended books
-    """
-    from pyspark.sql.functions import sqrt, min as spark_min, max as spark_max
-
     # Get liked book features
     liked_book = trajectory_df.filter(col("book_id") == liked_book_id).collect()
-
     if not liked_book:
         return spark.createDataFrame([], trajectory_df.schema)
 
@@ -271,13 +185,12 @@ def recommend_by_features(
     )
 
     # Normalize all features in the DataFrame and compute similarity
-    # Normalize each feature column
     def norm_col(col_name, min_val, max_val):
         if min_val == max_val:
             return lit(0.5)
         return (col(col_name) - min_val) / (max_val - min_val)
 
-    recommendations = (
+    feature_sim_df = (
         other_books.withColumn(
             "anger_norm", norm_col("avg_anger", min_anger, max_anger)
         )
@@ -299,7 +212,7 @@ def recommend_by_features(
             "dominance_norm", norm_col("avg_dominance", min_dominance, max_dominance)
         )
         .withColumn(
-            "similarity",
+            "feature_similarity",
             1.0
             / (
                 1.0
@@ -318,25 +231,154 @@ def recommend_by_features(
                 )
             ),
         )
+        .select(
+            "book_id",
+            "title",
+            "author",
+            "feature_similarity",
+            "avg_anger",
+            "avg_anticipation",
+            "avg_disgust",
+            "avg_fear",
+            "avg_joy",
+            "avg_sadness",
+            "avg_surprise",
+            "avg_trust",
+            "avg_valence",
+            "avg_arousal",
+        )
+    )
+
+    return feature_sim_df
+
+
+def recommend(
+    spark: SparkSession,
+    trajectory_df,
+    liked_book_id: str,
+    top_n: int = 10,
+    feature_weight: float = 0.6,
+    trajectory_weight: float = 0.4,
+):
+    """
+    Recommend books with similar emotion trajectories.
+
+    Combines feature-based similarity (11 aggregated features) and trajectory similarity
+    (emotion sequences) when available. Falls back to feature-based only when trajectory
+    arrays are not available.
+
+    Args:
+        spark: SparkSession
+        trajectory_df: DataFrame with book trajectories
+        liked_book_id: Book ID that user likes
+        top_n: Number of recommendations
+        feature_weight: Weight for feature-based similarity (default: 0.6)
+        trajectory_weight: Weight for trajectory similarity (default: 0.4)
+        Note: weights are normalized to sum to 1.0
+
+    Returns:
+        DataFrame with recommended books and similarity scores
+    """
+    # Remove duplicates (same book_id) - keep first occurrence
+    window = Window.partitionBy("book_id").orderBy("book_id")
+    trajectory_df = (
+        trajectory_df.withColumn("rn", row_number().over(window))
+        .filter(col("rn") == 1)
+        .drop("rn")
+    )
+
+    # Normalize weights
+    total_weight = feature_weight + trajectory_weight
+    if total_weight > 0:
+        feature_weight = feature_weight / total_weight
+        trajectory_weight = trajectory_weight / total_weight
+
+    # Get liked book
+    liked_book = trajectory_df.filter(col("book_id") == liked_book_id).collect()
+    if not liked_book:
+        return spark.createDataFrame([], trajectory_df.schema)
+
+    liked_row = liked_book[0]
+    has_trajectory = False
+    if "emotion_trajectory" in trajectory_df.columns:
+        try:
+            traj_value = liked_row["emotion_trajectory"]
+            has_trajectory = traj_value is not None
+        except (KeyError, AttributeError):
+            has_trajectory = False
+
+    # Compute feature-based similarity (always available)
+    feature_sim_df = compute_feature_similarity(spark, trajectory_df, liked_book_id)
+
+    # Compute trajectory similarity if available
+    if has_trajectory and "emotion_trajectory" in trajectory_df.columns:
+        # Check if other books also have trajectories
+        other_books_with_traj = trajectory_df.filter(
+            (col("book_id") != liked_book_id) & (col("emotion_trajectory").isNotNull())
+        )
+
+        if other_books_with_traj.count() > 0:
+            # Compute trajectory similarity for all books
+            similarity_udf = udf(
+                lambda traj: compute_trajectory_similarity(
+                    liked_row["emotion_trajectory"], traj
+                )
+                if traj is not None
+                else 0.0,
+                DoubleType(),
+            )
+
+            trajectory_sim_df = (
+                trajectory_df.filter(col("book_id") != liked_book_id)
+                .withColumn(
+                    "trajectory_similarity", similarity_udf(col("emotion_trajectory"))
+                )
+                .select("book_id", "trajectory_similarity")
+            )
+
+            # Join feature and trajectory similarities
+            combined_df = feature_sim_df.join(
+                trajectory_sim_df, on="book_id", how="outer"
+            )
+
+            # Fill missing trajectory similarity with 0 (when trajectory arrays not available)
+            combined_df = combined_df.fillna(0.0, subset=["trajectory_similarity"])
+
+            # Compute combined similarity: weighted average
+            combined_df = combined_df.withColumn(
+                "similarity",
+                (feature_weight * col("feature_similarity"))
+                + (trajectory_weight * col("trajectory_similarity")),
+            )
+        else:
+            # No other books have trajectories, use only feature-based
+            combined_df = feature_sim_df.withColumn(
+                "similarity", col("feature_similarity")
+            )
+    else:
+        # No trajectory data available, use only feature-based
+        combined_df = feature_sim_df.withColumn("similarity", col("feature_similarity"))
+
+    # Select final columns and order by similarity
+    result = (
+        combined_df.select(
+            "book_id",
+            "title",
+            "author",
+            "similarity",
+            "avg_anger",
+            "avg_anticipation",
+            "avg_disgust",
+            "avg_fear",
+            "avg_joy",
+            "avg_sadness",
+            "avg_surprise",
+            "avg_trust",
+            "avg_valence",
+            "avg_arousal",
+        )
         .orderBy(col("similarity").desc())
         .limit(top_n)
     )
 
-    return recommendations.select(
-        "book_id",
-        "title",
-        "author",
-        "similarity",
-        # All 8 Plutchik emotions
-        "avg_anger",
-        "avg_anticipation",
-        "avg_disgust",
-        "avg_fear",
-        "avg_joy",
-        "avg_sadness",
-        "avg_surprise",
-        "avg_trust",
-        # VAD scores
-        "avg_valence",
-        "avg_arousal",
-    )
+    return result

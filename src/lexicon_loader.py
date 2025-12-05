@@ -76,35 +76,3 @@ def load_vad_lexicon(spark: SparkSession, lexicon_path: str):
     df = df.withColumn("term", trim(col("term")))
 
     return df
-
-
-def create_emotion_dict_broadcast(spark: SparkSession, emotion_df):
-    """
-    Create a broadcast dictionary mapping (word, emotion) -> value for fast lookups.
-
-    Returns:
-        Broadcast variable containing dict: {(word, emotion): value}
-    """
-    # Collect to driver and create dictionary
-    emotion_dict = {}
-    for row in emotion_df.collect():
-        word = row["word"].lower()
-        emotion = row["emotion"]
-        emotion_dict[(word, emotion)] = 1
-
-    return spark.sparkContext.broadcast(emotion_dict)
-
-
-def create_vad_dict_broadcast(spark: SparkSession, vad_df):
-    """
-    Create a broadcast dictionary mapping term -> (valence, arousal, dominance).
-
-    Returns:
-        Broadcast variable containing dict: {term: (valence, arousal, dominance)}
-    """
-    vad_dict = {}
-    for row in vad_df.collect():
-        term = row["term"].lower()
-        vad_dict[term] = (row["valence"], row["arousal"], row["dominance"])
-
-    return spark.sparkContext.broadcast(vad_dict)

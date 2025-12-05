@@ -3,7 +3,7 @@ Score chunks with NRC Emotion and VAD lexicons.
 """
 
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, sum as spark_sum, avg, count, when
+from pyspark.sql.functions import col, sum as spark_sum, avg, count
 
 
 def score_chunks_with_emotions(spark: SparkSession, chunks_df, emotion_df):
@@ -114,46 +114,3 @@ def combine_emotion_vad_scores(emotion_scores_df, vad_scores_df):
             combined = combined.fillna(0, subset=[col_name])
 
     return combined
-
-
-def normalize_emotion_scores(chunks_df):
-    """
-    Normalize emotion scores by total word count in chunk.
-    This gives us emotion density rather than raw counts.
-
-    Args:
-        chunks_df: DataFrame with emotion scores
-
-    Returns:
-        DataFrame with normalized scores
-    """
-    # Calculate total emotion words per chunk (only Plutchik's 8 basic emotions)
-    emotion_cols = [
-        "anger",
-        "anticipation",
-        "disgust",
-        "fear",
-        "joy",
-        "sadness",
-        "surprise",
-        "trust",
-    ]
-
-    # Sum all emotions to get total
-    chunks_df = chunks_df.withColumn(
-        "total_emotion_words",
-        sum([col(c) for c in emotion_cols if c in chunks_df.columns]),
-    )
-
-    # Normalize each emotion by total (avoid division by zero)
-    for col_name in emotion_cols:
-        if col_name in chunks_df.columns:
-            chunks_df = chunks_df.withColumn(
-                f"{col_name}_normalized",
-                when(
-                    col("total_emotion_words") > 0,
-                    col(col_name) / col("total_emotion_words"),
-                ).otherwise(0.0),
-            )
-
-    return chunks_df
