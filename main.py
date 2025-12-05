@@ -144,7 +144,16 @@ def main():
         help="Path to NRC VAD Lexicon",
     )
     parser.add_argument(
-        "--chunk-size", type=int, default=10000, help="Chunk size in characters"
+        "--num-chunks",
+        type=int,
+        default=20,
+        help="Target number of chunks per book (percentage-based chunking, default: 20)",
+    )
+    parser.add_argument(
+        "--max-chunk-size",
+        type=int,
+        default=10000,
+        help="Maximum characters per chunk to prevent memory issues (default: 10000)",
     )
     parser.add_argument(
         "--limit",
@@ -236,8 +245,16 @@ def main():
 
         # Step 3: Create chunks
         print("\n[Step 3/8] Creating text chunks...")
-        chunks_df = create_chunks_df(spark, books_df, chunk_size=args.chunk_size)
-        print(f"  ✓ Created chunks (total rows: {chunks_df.count()})")
+        chunks_df = create_chunks_df(
+            spark,
+            books_df,
+            num_chunks=args.num_chunks,
+            max_chunk_size=args.max_chunk_size,
+        )
+        # Cache chunks_df to avoid recomputation during count
+        chunks_df.cache()
+        chunk_count = chunks_df.count()
+        print(f"  ✓ Created chunks (total rows: {chunk_count})")
 
         # Step 4: Score chunks with emotions
         print("\n[Step 4/8] Scoring chunks with emotions...")
@@ -248,6 +265,9 @@ def main():
         print("\n[Step 5/8] Scoring chunks with VAD...")
         vad_scores = score_chunks_with_vad(spark, chunks_df, vad_df)
         print(f"  ✓ Scored {vad_scores.count()} chunks with VAD")
+
+        # Unpersist chunks_df now that we have scores (saves memory)
+        chunks_df.unpersist()
 
         # Combine scores
         chunk_scores = combine_emotion_vad_scores(emotion_scores, vad_scores)
@@ -265,15 +285,23 @@ def main():
         book_embeddings = None
         if not args.skip_embeddings:
             print("\n[Step 7/8] Computing word embeddings...")
+            # Reload chunks_df for embeddings (we unpersisted it earlier)
+            print("  Recreating chunks for embeddings...")
+            chunks_df_emb = create_chunks_df(
+                spark,
+                books_df,
+                num_chunks=args.num_chunks,
+                max_chunk_size=args.max_chunk_size,
+            )
             print("  Training Word2Vec model...")
             word2vec_model = train_word2vec(
-                spark, chunks_df, vector_size=args.vector_size, min_count=5
+                spark, chunks_df_emb, vector_size=args.vector_size, min_count=5
             )
             print("  ✓ Word2Vec model trained")
 
             print("  Computing chunk embeddings...")
             chunk_embeddings = compute_chunk_embeddings(
-                spark, chunks_df, word2vec_model
+                spark, chunks_df_emb, word2vec_model
             )
             # Cache to avoid recomputation
             chunk_embeddings.cache()
@@ -287,6 +315,8 @@ def main():
 
             # Unpersist cached data
             chunk_embeddings.unpersist()
+            # Unpersist chunks_df_emb
+            chunks_df_emb.unpersist()
         else:
             print("\n[Step 7/8] Skipping word embeddings (--skip-embeddings)")
 
@@ -294,9 +324,17 @@ def main():
         book_topics = None
         if not args.skip_topics:
             print("\n[Step 8/8] Computing topic distributions...")
+            # Reload chunks_df for topic modeling
+            print("  Recreating chunks for topic modeling...")
+            chunks_df_topics = create_chunks_df(
+                spark,
+                books_df,
+                num_chunks=args.num_chunks,
+                max_chunk_size=args.max_chunk_size,
+            )
             print("  Preparing topic features...")
             feature_df, cv_model = prepare_topic_features(
-                spark, chunks_df, vocab_size=5000, min_df=2
+                spark, chunks_df_topics, vocab_size=5000, min_df=2
             )
             # Cache feature_df to avoid recomputation
             feature_df.cache()
@@ -322,6 +360,7 @@ def main():
             # Unpersist cached data
             feature_df.unpersist()
             chunk_topics.unpersist()
+            chunks_df_topics.unpersist()
         else:
             print("\n[Step 8/8] Skipping topic modeling (--skip-topics)")
 

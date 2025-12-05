@@ -878,7 +878,7 @@ def show_about():
     - **Visualizations**: Interactive plots showing emotion trajectories over time
     
     ### How it works:
-    1. Books are segmented into fixed-length chunks (10,000 characters)
+    1. Books are segmented into percentage-based chunks (default: 50 chunks per book)
     2. Each chunk is scored using NRC Emotion and VAD lexicons
     3. Emotion trajectories are analyzed to identify patterns
     4. Similar books are found using feature-based similarity

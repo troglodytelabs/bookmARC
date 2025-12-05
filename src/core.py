@@ -199,11 +199,17 @@ def get_input_trajectory(
             )
 
             text_len = len(text)
-            chunk_size = 10000
-            if text_len < 20000:
-                chunk_size = max(100, text_len // 10)
+            # Use percentage-based chunking: default 20 chunks
+            # For very short texts, use fewer chunks
+            num_chunks = 20
+            if text_len < 10000:
+                # For texts < 10k chars, use 10 chunks max
+                num_chunks = max(5, min(10, text_len // 1000))
 
-            chunks_df = create_chunks_df(spark, books_df, chunk_size=chunk_size)
+            # Use max_chunk_size to prevent memory issues with large texts
+            chunks_df = create_chunks_df(
+                spark, books_df, num_chunks=num_chunks, max_chunk_size=20000
+            )
             emotion_scores = score_chunks_with_emotions(spark, chunks_df, emotion_df)
             vad_scores = score_chunks_with_vad(spark, chunks_df, vad_df)
             chunk_scores = combine_emotion_vad_scores(emotion_scores, vad_scores)
@@ -303,11 +309,17 @@ def get_input_trajectory(
             )
 
             text_len = len(book_text)
-            chunk_size = 10000
-            if text_len < 20000:
-                chunk_size = max(100, text_len // 10)
+            # Use percentage-based chunking: default 20 chunks
+            # For very short texts, use fewer chunks
+            num_chunks = 20
+            if text_len < 10000:
+                # For texts < 10k chars, use 10 chunks max
+                num_chunks = max(5, min(10, text_len // 1000))
 
-            chunks_df = create_chunks_df(spark, books_df, chunk_size=chunk_size)
+            # Use max_chunk_size to prevent memory issues with large texts
+            chunks_df = create_chunks_df(
+                spark, books_df, num_chunks=num_chunks, max_chunk_size=20000
+            )
             emotion_scores = score_chunks_with_emotions(spark, chunks_df, emotion_df)
             vad_scores = score_chunks_with_vad(spark, chunks_df, vad_df)
             chunk_scores = combine_emotion_vad_scores(emotion_scores, vad_scores)

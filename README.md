@@ -6,7 +6,7 @@ A Spark-based big data analytics project that analyzes emotion trajectories in P
 
 EmoArc processes 75,000+ books from Project Gutenberg to:
 
-1. **Segment** texts into fixed-length chunks (10,000 characters)
+1. **Segment** texts into percentage-based chunks (default: 50 chunks per book)
 2. **Preprocess** text (remove stopwords, stemming, lemmatization)
 3. **Score** each chunk using NRC Emotion Lexicon (8 Plutchik emotions) and NRC VAD Lexicon (Valence, Arousal, Dominance)
 4. **Analyze** emotion trajectories to identify peaks, dominant emotions, and patterns
@@ -73,8 +73,8 @@ python main.py
 # Process limited number of books (for testing)
 python main.py --limit 100
 
-# Custom chunk size
-python main.py --chunk-size 5000
+# Custom number of chunks (percentage-based)
+python main.py --num-chunks 100  # Creates 100 chunks per book
 
 # Custom output directory
 python main.py --output results/
@@ -186,7 +186,7 @@ This will open a web browser at `http://localhost:8501` with an interactive inte
 - `--metadata`: Path to metadata CSV (default: `data/gutenberg_metadata.csv`)
 - `--emotion-lexicon`: Path to NRC Emotion Lexicon
 - `--vad-lexicon`: Path to NRC VAD Lexicon
-- `--chunk-size`: Chunk size in characters (default: 10000)
+- `--num-chunks`: Number of chunks per book for percentage-based chunking (default: 50)
 - `--limit`: Limit number of books to process (for testing)
 - `--output`: Output directory for results (default: `output`)
 - `--language`: Filter books by language (default: `en`)
@@ -212,7 +212,7 @@ The system processes books through a pipeline that extracts emotional features a
 
 ### 1. Text Segmentation
 
-- Books are split into fixed-length chunks (default: 10,000 characters)
+- Books are split into percentage-based chunks (default: 50 chunks per book)
 - Each chunk is assigned a sequential index
 
 ### 2. Preprocessing

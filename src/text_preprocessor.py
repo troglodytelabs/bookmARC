@@ -106,34 +106,91 @@ def load_books(
 # UDFs are now defined inside create_chunks_df to avoid module serialization issues
 
 
-def create_chunks_df(spark: SparkSession, books_df, chunk_size: int = 10000):
+def create_chunks_df(
+    spark: SparkSession, books_df, num_chunks: int = 20, max_chunk_size: int = 20000
+):
     """
-    Create chunks from books DataFrame.
+    Create chunks from books DataFrame using percentage-based chunking with max size limit.
 
     Args:
         spark: SparkSession
         books_df: DataFrame with columns: book_id, title, author, text
-        chunk_size: Size of each chunk in characters
+        num_chunks: Target number of chunks to create (may be adjusted based on max_chunk_size)
+        max_chunk_size: Maximum characters per chunk to prevent memory issues (default: 20000)
 
     Returns:
         DataFrame with columns: book_id, title, author, chunk_index, chunk_text, word
     """
 
-    # Define chunk creation function with chunk_size captured in closure
+    # Define chunk creation function with num_chunks and max_chunk_size captured in closure
     # This must be self-contained for Spark serialization
-    def make_chunk_udf(size):
-        """Factory function to create chunk UDF with captured chunk_size."""
+    def make_chunk_udf(n_chunks, max_size):
+        """Factory function to create chunk UDF with captured parameters."""
 
         def _create_chunks_wrapper(text):
-            """Wrapper function for UDF that creates chunks."""
-            if not text:
-                return []
-            chunks = []
-            for i in range(0, len(text), size):
-                chunks.append(
-                    {"chunk_index": i // size, "chunk_text": text[i : i + size]}
+            """Wrapper function for UDF that creates percentage-based chunks with size limits."""
+            try:
+                if not text:
+                    return []
+
+                text_len = len(text)
+                if text_len == 0:
+                    return []
+
+                # Calculate ideal chunk size based on percentage
+                ideal_chunk_size = (
+                    max(1, text_len // n_chunks) if n_chunks > 0 else text_len
                 )
-            return chunks
+
+                # For very short texts, ensure minimum chunk size to avoid too many tiny chunks
+                min_chunk_size = 100
+                if text_len < min_chunk_size * n_chunks:
+                    # Adjust num_chunks for very short texts
+                    actual_num_chunks = (
+                        max(1, text_len // min_chunk_size) if min_chunk_size > 0 else 1
+                    )
+                    chunk_size = (
+                        max(1, text_len // actual_num_chunks)
+                        if actual_num_chunks > 0
+                        else text_len
+                    )
+                else:
+                    # For large texts, limit chunk size to prevent memory issues
+                    if ideal_chunk_size > max_size:
+                        # Recalculate actual number of chunks based on max_chunk_size
+                        actual_num_chunks = (
+                            max(n_chunks, (text_len + max_size - 1) // max_size)
+                            if max_size > 0
+                            else n_chunks
+                        )
+                        chunk_size = max_size
+                    else:
+                        actual_num_chunks = n_chunks
+                        chunk_size = ideal_chunk_size
+
+                # Ensure we have at least 1 chunk
+                actual_num_chunks = max(1, actual_num_chunks)
+                chunk_size = max(1, chunk_size)
+
+                chunks = []
+                for i in range(actual_num_chunks):
+                    start_idx = i * chunk_size
+                    # Last chunk gets all remaining text
+                    if i == actual_num_chunks - 1:
+                        end_idx = text_len
+                    else:
+                        end_idx = min(start_idx + chunk_size, text_len)
+
+                    # Ensure we don't go out of bounds
+                    if start_idx < text_len:
+                        chunks.append(
+                            {"chunk_index": i, "chunk_text": text[start_idx:end_idx]}
+                        )
+
+                return chunks if chunks else [{"chunk_index": 0, "chunk_text": text}]
+            except Exception:
+                # Fallback: return entire text as single chunk if anything goes wrong
+                return [{"chunk_index": 0, "chunk_text": str(text) if text else ""}]
 
         return udf(
             _create_chunks_wrapper,
@@ -147,8 +204,8 @@ def create_chunks_df(spark: SparkSession, books_df, chunk_size: int = 10000):
             ),
         )
 
-    # Create UDF with chunk_size
-    chunk_udf = make_chunk_udf(chunk_size)
+    # Create UDF with num_chunks and max_chunk_size
+    chunk_udf = make_chunk_udf(num_chunks, max_chunk_size)
 
     # Define preprocessing function - completely self-contained, defined inside this function
     def _preprocess_wrapper(text):
