@@ -29,6 +29,7 @@ def score_chunks_with_emotions(spark: SparkSession, chunks_df, emotion_df):
     ).agg(count("emotion").alias("emotion_count"))
 
     # Pivot to get one row per chunk with all emotions
+    # Use only Plutchik's 8 basic emotions (exclude "negative" and "positive" which are sentiment labels)
     chunk_emotions_pivot = (
         chunk_emotions.groupBy("book_id", "title", "author", "chunk_index")
         .pivot(
@@ -39,8 +40,6 @@ def score_chunks_with_emotions(spark: SparkSession, chunks_df, emotion_df):
                 "disgust",
                 "fear",
                 "joy",
-                "negative",
-                "positive",
                 "sadness",
                 "surprise",
                 "trust",
@@ -99,15 +98,13 @@ def combine_emotion_vad_scores(emotion_scores_df, vad_scores_df):
         vad_scores_df, on=["book_id", "title", "author", "chunk_index"], how="outer"
     )
 
-    # Fill missing values with 0
+    # Fill missing values with 0 (only Plutchik's 8 basic emotions)
     emotion_cols = [
         "anger",
         "anticipation",
         "disgust",
         "fear",
         "joy",
-        "negative",
-        "positive",
         "sadness",
         "surprise",
         "trust",
@@ -130,15 +127,13 @@ def normalize_emotion_scores(chunks_df):
     Returns:
         DataFrame with normalized scores
     """
-    # Calculate total emotion words per chunk
+    # Calculate total emotion words per chunk (only Plutchik's 8 basic emotions)
     emotion_cols = [
         "anger",
         "anticipation",
         "disgust",
         "fear",
         "joy",
-        "negative",
-        "positive",
         "sadness",
         "surprise",
         "trust",

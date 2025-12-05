@@ -11,7 +11,8 @@ def load_emotion_lexicon(spark: SparkSession, lexicon_path: str):
     Load NRC Emotion Lexicon (word-level) into Spark DataFrame.
 
     Format: word\temotion\tvalue (0 or 1)
-    Emotions: anger, anticipation, disgust, fear, joy, negative, positive, sadness, surprise, trust
+    Emotions: anger, anticipation, disgust, fear, joy, sadness, surprise, trust (Plutchik's 8 basic emotions)
+    Note: The lexicon also includes "negative" and "positive" (sentiment labels), but we use only the 8 emotions
 
     Returns:
         DataFrame with columns: word, emotion, value

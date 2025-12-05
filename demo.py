@@ -21,7 +21,7 @@ matplotlib.use("Agg")  # Use non-interactive backend
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
 
 from lexicon_loader import load_emotion_lexicon, load_vad_lexicon
-from text_preprocessor import load_books, create_chunks_df
+from text_preprocessor import create_chunks_df
 from emotion_scorer import (
     score_chunks_with_emotions,
     score_chunks_with_vad,
@@ -37,15 +37,24 @@ def load_trajectories_with_types(spark, trajectories_path):
 
     # Cast numeric columns
     numeric_cols = [
+        # All 8 Plutchik emotions - peaks
         "max_anger",
-        "max_joy",
+        "max_anticipation",
+        "max_disgust",
         "max_fear",
+        "max_joy",
         "max_sadness",
         "max_surprise",
+        "max_trust",
+        # All 8 Plutchik emotions - averages
         "avg_anger",
-        "avg_joy",
+        "avg_anticipation",
+        "avg_disgust",
         "avg_fear",
+        "avg_joy",
         "avg_sadness",
+        "avg_surprise",
+        "avg_trust",
         "avg_valence",
         "avg_arousal",
         "avg_dominance",
@@ -283,18 +292,61 @@ def get_input_trajectory(
             emotion_df = load_emotion_lexicon(spark, emotion_lexicon)
             vad_df = load_vad_lexicon(spark, vad_lexicon)
 
-            books_df = load_books(
-                spark, books_dir, metadata_path, language="en", limit=None
+            metadata_df = spark.read.option("header", "true").csv(metadata_path)
+            metadata_df = metadata_df.filter(
+                (col("Language") == "en") & (col("Etext Number") == book_id)
             )
-            books_df = books_df.filter(col("book_id") == book_id)
 
-            if books_df.count() == 0:
-                print(f"  ❌ Book {book_id} not found in Gutenberg data!")
+            if metadata_df.count() == 0:
+                print(f"  ❌ Book {book_id} not found in Gutenberg metadata!")
                 return None, None, None, None
 
-            book_info = books_df.select("title", "author").first()
+            # Get book info
+            book_info = metadata_df.select(
+                col("Etext Number").alias("book_id"),
+                col("Title").alias("title"),
+                col("Authors").alias("author"),
+            ).first()
+
             title = book_info["title"]
             author = book_info["author"]
+
+            from pyspark.sql.types import StructType, StructField, StringType
+            import re
+
+            def read_book_text(book_id: str) -> str:
+                """Read book text from file."""
+                try:
+                    book_path = f"{books_dir}/{book_id}"
+                    with open(book_path, "r", encoding="utf-8", errors="ignore") as f:
+                        text = f.read()
+                        # Remove Project Gutenberg headers/footers
+                        text = re.sub(
+                            r"\*\*\* START.*?\*\*\*", "", text, flags=re.DOTALL
+                        )
+                        text = re.sub(r"\*\*\* END.*?\*\*\*", "", text, flags=re.DOTALL)
+                        return text
+                except Exception as e:
+                    print(f"    Warning: Could not read book file {book_id}: {e}")
+                    return ""
+
+            book_text = read_book_text(book_id)
+            if not book_text:
+                print(f"  ❌ Could not read book file for {book_id}!")
+                return None, None, None, None
+
+            schema = StructType(
+                [
+                    StructField("book_id", StringType(), True),
+                    StructField("title", StringType(), True),
+                    StructField("author", StringType(), True),
+                    StructField("text", StringType(), True),
+                ]
+            )
+            books_df = spark.createDataFrame(
+                [(book_id, title, author, book_text)], schema
+            )
+
             print(f"    Title: {title}")
             print(f"    Author: {author}")
 
@@ -443,7 +495,21 @@ def demo_recommendations(
     liked_id = liked_trajectory.select("book_id").first()["book_id"]
 
     # Combine liked trajectory with trajectories from main.py output
-    all_trajectories = trajectories.union(liked_trajectory)
+    # Use unionByName to handle schema differences (e.g., if CSV was created with old schema)
+    # This allows union even if columns differ, filling missing columns with null
+    try:
+        all_trajectories = trajectories.unionByName(
+            liked_trajectory, allowMissingColumns=True
+        )
+    except Exception:
+        # Fallback: if unionByName fails, align schemas manually
+        trajectories_cols = set(trajectories.columns)
+        liked_cols = set(liked_trajectory.columns)
+        common_cols = sorted(list(trajectories_cols & liked_cols))
+
+        trajectories_aligned = trajectories.select(*common_cols)
+        liked_trajectory_aligned = liked_trajectory.select(*common_cols)
+        all_trajectories = trajectories_aligned.union(liked_trajectory_aligned)
 
     recommendations = recommend_by_features(spark, all_trajectories, liked_id, top_n=10)
 
@@ -455,9 +521,18 @@ def demo_recommendations(
         print(f"  {idx + 1}. {row['title']}")
         print(f"     Author: {row['author']}")
         print(f"     Similarity: {row['similarity']:.4f}")
-        print(
-            f"     Emotions - Joy: {row['avg_joy']:.3f}, Sadness: {row['avg_sadness']:.3f}"
+        # Display key emotions (show all 8 Plutchik emotions)
+        emotions_str = (
+            f"Anger: {row.get('avg_anger', 0):.2f}, "
+            f"Anticipation: {row.get('avg_anticipation', 0):.2f}, "
+            f"Disgust: {row.get('avg_disgust', 0):.2f}, "
+            f"Fear: {row.get('avg_fear', 0):.2f}, "
+            f"Joy: {row.get('avg_joy', 0):.2f}, "
+            f"Sadness: {row.get('avg_sadness', 0):.2f}, "
+            f"Surprise: {row.get('avg_surprise', 0):.2f}, "
+            f"Trust: {row.get('avg_trust', 0):.2f}"
         )
+        print(f"     Emotions - {emotions_str}")
         print()
 
     # Save to CSV

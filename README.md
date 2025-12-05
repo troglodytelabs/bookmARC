@@ -162,6 +162,8 @@ This will:
 
 ## How It Works
 
+The system processes books through a pipeline that extracts emotional features and compares them to find similar books.
+
 ### 1. Text Segmentation
 
 - Books are split into fixed-length chunks (default: 10,000 characters)
@@ -177,24 +179,68 @@ This will:
 
 ### 3. Emotion Scoring
 
-- Map each word to NRC Emotion Lexicon (8 emotions: anger, anticipation, disgust, fear, joy, sadness, surprise, trust)
+- Map each word to NRC Emotion Lexicon using **Plutchik's 8 basic emotions**: anger, anticipation, disgust, fear, joy, sadness, surprise, trust
+- Note: The NRC lexicon also includes "negative" and "positive" (sentiment labels), but we focus on the 8 core emotions for better accuracy
 - Map each word to NRC VAD Lexicon (Valence, Arousal, Dominance)
 - Aggregate scores per chunk (counts for emotions, averages for VAD)
 
 ### 4. Trajectory Analysis
 
-- Compute statistics per book:
-  - Maximum emotion peaks
-  - Average emotions across chunks
-  - VAD statistics (mean, stddev)
-  - Emotion trajectory arrays
+For each book, we compute aggregated statistics that capture the emotional trajectory:
 
-### 5. Recommendation
+**Emotion Statistics (per book):**
 
-- Compute similarity between books using:
-  - Feature-based similarity (Euclidean distance on normalized features)
-  - Trajectory similarity (cosine similarity on emotion sequences)
-- Return top N most similar books
+- **Peak emotions**: Maximum value for each of the 8 Plutchik emotions across all chunks
+  - `max_anger`, `max_anticipation`, `max_disgust`, `max_fear`, `max_joy`, `max_sadness`, `max_surprise`, `max_trust`
+- **Average emotions**: Mean value for each emotion across all chunks
+  - `avg_anger`, `avg_anticipation`, `avg_disgust`, `avg_fear`, `avg_joy`, `avg_sadness`, `avg_surprise`, `avg_trust`
+- **VAD statistics**:
+  - Mean: `avg_valence`, `avg_arousal`, `avg_dominance`
+  - Standard deviation: `valence_std`, `arousal_std` (captures variability in emotional tone)
+- **Trajectory features**:
+  - `num_chunks`: Total number of chunks in the book
+  - `emotion_trajectory`: Array of emotion scores per chunk (stored in memory, not saved to CSV)
+
+**Why these features?**
+
+- **Peaks** identify the most intense emotional moments
+- **Averages** capture the overall emotional tone
+- **Standard deviations** measure emotional variability (steady vs. dramatic arcs)
+- Together, they create a "fingerprint" of the book's emotional journey
+
+### 5. Recommendation System
+
+The recommendation system finds books with similar emotional trajectories using **feature-based similarity**:
+
+**Similarity Calculation:**
+
+1. **Feature Extraction**: For each book, extract 11 normalized features:
+
+   - 8 Plutchik emotion averages (anger, anticipation, disgust, fear, joy, sadness, surprise, trust)
+   - 3 VAD scores (valence, arousal, dominance)
+
+2. **Normalization**:
+
+   - Each feature is normalized to 0-1 range using min-max normalization
+   - Normalization is based on the range across all books (excluding the query book)
+   - This ensures all features contribute equally despite different scales
+
+3. **Distance Calculation**:
+
+   - Compute Euclidean distance in the 11-dimensional normalized feature space
+   - Formula: `distance = sqrt(Σ(feature_i - query_i)²)` for all 11 features
+
+4. **Similarity Score**:
+
+   - Convert distance to similarity: `similarity = 1 / (1 + distance)`
+   - Range: 0 (completely different) to 1 (identical)
+   - Typical range: 0.65-0.90 for similar books
+
+5. **Ranking**:
+   - Sort all books by similarity score (descending)
+   - Return top N recommendations
+
+**Note**: Trajectory similarity (cosine similarity on emotion sequences) is available but not currently used, as feature-based similarity is faster and provides good results.
 
 ## Output
 
