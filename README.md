@@ -51,17 +51,13 @@ emoArc/
 uv sync
 ```
 
-2. Download Data:
+2. Download Data (NRC Lexicons & Gutenberg Books):
 
    Place the following files in the `data/` directory:
-
-NRC Lexicons
-   - `NRC-Emotion-Lexicon-Wordlevel-v0.92.txt` - Download from [NRC Emotion Lexicon](http://saifmohammad.com/WebPages/NRC-Emotion-Lexicon.htm)
-   - `NRC-VAD-Lexicon-v2.1.txt` - Download from [NRC VAD Lexicon](http://saifmohammad.com/WebPages/nrc-vad.html)
-
-[Gutenberg Books & Meta data](https://www.kaggle.com/datasets/lokeshparab/gutenberg-books-and-metadata-2025?select=books)
-   - 'books' directory
-   - 'gutenberg_metadata.csv'
+      - `NRC-Emotion-Lexicon-Wordlevel-v0.92.txt` - Download from [NRC Emotion Lexicon](http://saifmohammad.com/WebPages/NRC-Emotion-Lexicon.htm)
+      - `NRC-VAD-Lexicon-v2.1.txt` - Download from [NRC VAD Lexicon](http://saifmohammad.com/WebPages/nrc-vad.html)
+      - `books` directory - Download from [Kaggle](https://www.kaggle.com/datasets/lokeshparab/gutenberg-books-and-metadata-2025?select=books)
+      - `gutenberg_metadata.csv` - Download from [Kaggle](https://www.kaggle.com/datasets/lokeshparab/gutenberg-books-and-metadata-2025?select=books)
 
    These files are not included in the repository.
 
