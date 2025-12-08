@@ -4,9 +4,9 @@ A Spark-based big data analytics project that analyzes emotion trajectories in P
 
 ## Overview
 
-[Project Gutenberg](https://www.gutenberg.org/) is the oldest digital library archive of cultural works which aims to make literature accessible to everyone through its 70,000+ free eBooks -- primarily public domain books whose copyrights have expired.
+[Project Gutenberg](https://www.gutenberg.org/) is the oldest digital library archive with over 70,000 free eBooks -- primarily public domain books whose copyrights have expired -- that help make literature accessible to all.
 
-EmoArc processes 75,000+ books from Project Gutenberg to:
+**EmoArc** processes 75,000+ books from Project Gutenberg to:
 
 1. **Segment** texts into percentage-based chunks (default: 50 chunks per book)
 2. **Preprocess** text (remove stopwords, stemming, lemmatization)
