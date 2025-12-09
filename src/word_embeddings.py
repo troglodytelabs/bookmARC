@@ -100,7 +100,6 @@ def compute_book_embedding(spark: SparkSession, chunk_embeddings_df):
     Returns:
         DataFrame with book-level embeddings
     """
-    from pyspark.sql.functions import sum as spark_sum, count, when
     from pyspark.sql.types import (
         StructType,
         StructField,

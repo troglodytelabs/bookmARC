@@ -21,60 +21,6 @@ from pyspark.sql.types import DoubleType
 import math
 
 
-# Import embedding and topic similarity functions
-# Import inside UDFs to avoid serialization issues
-def _compute_embedding_similarity(embedding1, embedding2):
-    """Compute cosine similarity between two embeddings (inline to avoid import issues)."""
-    import numpy as np
-
-    if not embedding1 or not embedding2:
-        return 0.0
-
-    try:
-        vec1 = np.array(embedding1)
-        vec2 = np.array(embedding2)
-
-        dot_product = np.dot(vec1, vec2)
-        norm1 = np.linalg.norm(vec1)
-        norm2 = np.linalg.norm(vec2)
-
-        if norm1 == 0 or norm2 == 0:
-            return 0.0
-
-        similarity = dot_product / (norm1 * norm2)
-        return float((similarity + 1) / 2.0)
-    except Exception:
-        return 0.0
-
-
-def _compute_topic_similarity(topics1, topics2):
-    """Compute cosine similarity between two topic distributions (inline to avoid import issues)."""
-    import numpy as np
-
-    if not topics1 or not topics2:
-        return 0.0
-
-    try:
-        vec1 = np.array(topics1)
-        vec2 = np.array(topics2)
-
-        min_len = min(len(vec1), len(vec2))
-        vec1 = vec1[:min_len]
-        vec2 = vec2[:min_len]
-
-        dot_product = np.dot(vec1, vec2)
-        norm1 = np.linalg.norm(vec1)
-        norm2 = np.linalg.norm(vec2)
-
-        if norm1 == 0 or norm2 == 0:
-            return 0.0
-
-        similarity = dot_product / (norm1 * norm2)
-        return float(similarity)
-    except Exception:
-        return 0.0
-
-
 def compute_trajectory_similarity(traj1, traj2):
     """
     Compute similarity between two emotion trajectories.

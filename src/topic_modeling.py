@@ -6,7 +6,7 @@ Extracts thematic topics from books to enhance recommendation quality.
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, collect_list, udf
 from pyspark.sql.types import ArrayType, DoubleType
-from pyspark.ml.feature import CountVectorizer, CountVectorizerModel, IDF, IDFModel
+from pyspark.ml.feature import CountVectorizer
 from pyspark.ml.clustering import LDA, LDAModel
 import numpy as np
 

@@ -14,7 +14,6 @@ from pyspark.sql.functions import (
     collect_list,
     sort_array,
     count,
-    lit,
     when,
     sqrt as spark_sqrt,
 )

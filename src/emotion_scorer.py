@@ -3,7 +3,7 @@ Score chunks with NRC Emotion and VAD lexicons.
 """
 
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, sum as spark_sum, avg, count
+from pyspark.sql.functions import sum as spark_sum, avg, count
 
 
 def score_chunks_with_emotions(spark: SparkSession, chunks_df, emotion_df):
