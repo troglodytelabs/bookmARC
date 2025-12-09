@@ -751,7 +751,7 @@ def show_find_books_by_emotions():
     """Show page for finding books by emotion preferences."""
     st.header("Find Books by Emotion Preferences")
     st.markdown(
-        "Specify what emotions you want to experience while reading, and we'll find books that match your preferences."
+        "Pick a vibe in one click, optionally fine-tune, then get matches."
     )
 
     # Output directory
@@ -765,43 +765,146 @@ def show_find_books_by_emotions():
         )
         return
 
-    # Emotion preference sliders
-    st.subheader("Desired Emotion Levels")
-    st.markdown(
-        "Adjust the sliders to indicate how much of each emotion you want in your reading experience (0 = none, 1 = maximum)."
+    # Simple presets to reduce friction; sliders are now optional fine-tuning
+    st.subheader("Choose a vibe")
+    presets = {
+        "Balanced": {
+            "joy": 0.5,
+            "anticipation": 0.5,
+            "surprise": 0.3,
+            "trust": 0.5,
+            "sadness": 0.0,
+            "fear": 0.0,
+            "anger": 0.0,
+            "disgust": 0.0,
+        },
+        "Cozy & Uplifting": {
+            "joy": 0.7,
+            "anticipation": 0.6,
+            "surprise": 0.2,
+            "trust": 0.6,
+            "sadness": 0.0,
+            "fear": 0.0,
+            "anger": 0.0,
+            "disgust": 0.0,
+        },
+        "Adventurous": {
+            "joy": 0.5,
+            "anticipation": 0.7,
+            "surprise": 0.5,
+            "trust": 0.4,
+            "sadness": 0.1,
+            "fear": 0.2,
+            "anger": 0.0,
+            "disgust": 0.0,
+        },
+        "Dark & Tense": {
+            "joy": 0.1,
+            "anticipation": 0.4,
+            "surprise": 0.3,
+            "trust": 0.2,
+            "sadness": 0.5,
+            "fear": 0.5,
+            "anger": 0.2,
+            "disgust": 0.2,
+        },
+        "Surprising": {
+            "joy": 0.4,
+            "anticipation": 0.6,
+            "surprise": 0.7,
+            "trust": 0.3,
+            "sadness": 0.0,
+            "fear": 0.1,
+            "anger": 0.0,
+            "disgust": 0.0,
+        },
+    }
+
+    preset_choice = st.radio(
+        "Quick presets",
+        list(presets.keys()),
+        horizontal=True,
+        key="emotion_pref_preset",
     )
+    emotion_preferences = presets.get(preset_choice, presets["Balanced"]).copy()
+    st.caption("Adjust nothing else to use the preset as-is.")
 
-    col1, col2 = st.columns(2)
+    with st.expander("Fine-tune (optional)", expanded=False):
+        st.markdown("Pick a level instead of precise numbers.")
+        level_opts = ["None", "Low", "Medium", "High"]
+        level_map = {"None": 0.0, "Low": 0.25, "Medium": 0.5, "High": 0.75}
+        level_map_high = {"None": 0.0, "Low": 0.33, "Medium": 0.66, "High": 1.0}
 
-    emotion_preferences = {}
+        def level_from_value(val, use_high=False):
+            candidates = level_map_high if use_high else level_map
+            return min(candidates.keys(), key=lambda k: abs(candidates[k] - val))
+        col1, col2 = st.columns(2)
 
-    with col1:
-        emotion_preferences["joy"] = st.slider(
-            "Joy", 0.0, 1.0, 0.5, 0.1, key="pref_joy"
-        )
-        emotion_preferences["sadness"] = st.slider(
-            "Sadness", 0.0, 1.0, 0.0, 0.1, key="pref_sadness"
-        )
-        emotion_preferences["fear"] = st.slider(
-            "Fear", 0.0, 1.0, 0.0, 0.1, key="pref_fear"
-        )
-        emotion_preferences["anger"] = st.slider(
-            "Anger", 0.0, 1.0, 0.0, 0.1, key="pref_anger"
-        )
+        with col1:
+            joy_level = st.select_slider(
+                "Joy",
+                options=level_opts,
+                value=level_from_value(emotion_preferences["joy"]),
+                key="pref_joy",
+            )
+            emotion_preferences["joy"] = level_map[joy_level]
 
-    with col2:
-        emotion_preferences["anticipation"] = st.slider(
-            "Anticipation", 0.0, 1.0, 0.5, 0.1, key="pref_anticipation"
-        )
-        emotion_preferences["surprise"] = st.slider(
-            "Surprise", 0.0, 1.0, 0.3, 0.1, key="pref_surprise"
-        )
-        emotion_preferences["trust"] = st.slider(
-            "Trust", 0.0, 1.0, 0.5, 0.1, key="pref_trust"
-        )
-        emotion_preferences["disgust"] = st.slider(
-            "Disgust", 0.0, 1.0, 0.0, 0.1, key="pref_disgust"
-        )
+            sadness_level = st.select_slider(
+                "Sadness",
+                options=level_opts,
+                value=level_from_value(emotion_preferences["sadness"]),
+                key="pref_sadness",
+            )
+            emotion_preferences["sadness"] = level_map[sadness_level]
+
+            fear_level = st.select_slider(
+                "Fear",
+                options=level_opts,
+                value=level_from_value(emotion_preferences["fear"]),
+                key="pref_fear",
+            )
+            emotion_preferences["fear"] = level_map[fear_level]
+
+            anger_level = st.select_slider(
+                "Anger",
+                options=level_opts,
+                value=level_from_value(emotion_preferences["anger"]),
+                key="pref_anger",
+            )
+            emotion_preferences["anger"] = level_map[anger_level]
+
+        with col2:
+            anticipation_level = st.select_slider(
+                "Anticipation",
+                options=level_opts,
+                value=level_from_value(emotion_preferences["anticipation"], use_high=True),
+                key="pref_anticipation",
+            )
+            emotion_preferences["anticipation"] = level_map_high[anticipation_level]
+
+            surprise_level = st.select_slider(
+                "Surprise",
+                options=level_opts,
+                value=level_from_value(emotion_preferences["surprise"], use_high=True),
+                key="pref_surprise",
+            )
+            emotion_preferences["surprise"] = level_map_high[surprise_level]
+
+            trust_level = st.select_slider(
+                "Trust",
+                options=level_opts,
+                value=level_from_value(emotion_preferences["trust"]),
+                key="pref_trust",
+            )
+            emotion_preferences["trust"] = level_map[trust_level]
+
+            disgust_level = st.select_slider(
+                "Disgust",
+                options=level_opts,
+                value=level_from_value(emotion_preferences["disgust"]),
+                key="pref_disgust",
+            )
+            emotion_preferences["disgust"] = level_map[disgust_level]
 
     # Number of results
     top_n = st.slider("Number of books to show", 10, 50, 20, key="emotion_pref_top_n")
