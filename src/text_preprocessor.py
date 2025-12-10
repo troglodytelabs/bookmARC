@@ -3,7 +3,7 @@ Text preprocessing: chunking, stopwords removal, tokenization.
 """
 
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, udf, explode, regexp_extract
+from pyspark.sql.functions import col, udf, explode, regexp_extract, broadcast
 from pyspark.sql.types import (
     ArrayType,
     StringType,
@@ -11,21 +11,106 @@ from pyspark.sql.types import (
     StructType,
     StructField,
 )
-import re
-import nltk
 
-# Download required NLTK data (stopwords are downloaded inside UDF if needed)
-# Module-level download ensures availability before UDF execution
+# Load stopwords once at module level (on driver)
+# This avoids NLTK dependency on worker nodes
 try:
-    nltk.data.find("corpora/stopwords")
-except LookupError:
-    nltk.download("stopwords", quiet=True)
+    import nltk
 
-# Download wordnet for lemmatization
-try:
-    nltk.data.find("corpora/wordnet")
-except LookupError:
-    nltk.download("wordnet", quiet=True)
+    try:
+        nltk.data.find("corpora/stopwords")
+    except LookupError:
+        nltk.download("stopwords", quiet=True)
+    from nltk.corpus import stopwords
+
+    ENGLISH_STOPWORDS = set(stopwords.words("english"))
+except Exception:
+    # Fallback: minimal stopwords list if NLTK not available
+    ENGLISH_STOPWORDS = {
+        "the",
+        "a",
+        "an",
+        "and",
+        "or",
+        "but",
+        "in",
+        "on",
+        "at",
+        "to",
+        "for",
+        "of",
+        "with",
+        "by",
+        "from",
+        "as",
+        "is",
+        "was",
+        "are",
+        "were",
+        "been",
+        "be",
+        "have",
+        "has",
+        "had",
+        "do",
+        "does",
+        "did",
+        "will",
+        "would",
+        "could",
+        "should",
+        "may",
+        "might",
+        "must",
+        "shall",
+        "can",
+        "need",
+        "it",
+        "its",
+        "this",
+        "that",
+        "these",
+        "those",
+        "i",
+        "you",
+        "he",
+        "she",
+        "we",
+        "they",
+        "what",
+        "which",
+        "who",
+        "whom",
+        "when",
+        "where",
+        "why",
+        "how",
+        "all",
+        "each",
+        "every",
+        "both",
+        "few",
+        "more",
+        "most",
+        "other",
+        "some",
+        "such",
+        "no",
+        "nor",
+        "not",
+        "only",
+        "own",
+        "same",
+        "so",
+        "than",
+        "too",
+        "very",
+        "just",
+        "also",
+        "now",
+        "here",
+        "there",
+    }
 
 
 def load_and_chunk_books(
@@ -98,13 +183,19 @@ def load_and_chunk_books(
 
     # Create a SINGLE UDF that goes from binary content → array of (chunk_index, words)
     # This processes the entire book in one UDF call, never storing text in DataFrame
-    def make_process_book_udf(n_chunks):
+
+    # Broadcast stopwords to all workers (loaded once on driver, sent to all executors)
+    stopwords_bc = spark.sparkContext.broadcast(ENGLISH_STOPWORDS)
+
+    def make_process_book_udf(n_chunks, stopwords_broadcast):
         """Create UDF that processes book content directly to chunked words."""
+
+        # Capture the broadcast value in the closure
+        stop_words_value = stopwords_broadcast.value
 
         def _process_book(content):
             """Process book binary content to list of (chunk_index, words) tuples."""
             import re
-            import nltk
 
             if content is None:
                 return []
@@ -126,17 +217,8 @@ def load_and_chunk_books(
             if text_len == 0:
                 return []
 
-            # Get stopwords
-            try:
-                from nltk.corpus import stopwords
-
-                try:
-                    nltk.data.find("corpora/stopwords")
-                except LookupError:
-                    nltk.download("stopwords", quiet=True)
-                stop_words = set(stopwords.words("english"))
-            except Exception:
-                stop_words = set()
+            # Use stopwords captured in closure (from broadcast)
+            stop_words = stop_words_value
 
             # Process each chunk
             chunk_size = max(1, text_len // n_chunks)
@@ -180,7 +262,7 @@ def load_and_chunk_books(
             ),
         )
 
-    process_book_udf = make_process_book_udf(num_chunks)
+    process_book_udf = make_process_book_udf(num_chunks, stopwords_bc)
 
     # Process books: content → array of chunks with words (text never stored)
     chunks_df = books_df.select(
@@ -269,28 +351,21 @@ def create_chunks_df(spark: SparkSession, books_df, num_chunks: int = 20):
     # Create UDF with num_chunks
     chunk_udf = make_chunk_udf(num_chunks)
 
-    # Define preprocessing function - completely self-contained, defined inside this function
+    # Broadcast stopwords to workers (use module-level stopwords loaded on driver)
+    stopwords_bc = spark.sparkContext.broadcast(ENGLISH_STOPWORDS)
+    # Capture the value in a local variable for the closure
+    stop_words_set = stopwords_bc.value
+
+    # Define preprocessing function using captured stopwords
     def _preprocess_wrapper(text):
         """Wrapper function for UDF that handles preprocessing."""
         if not text:
             return []
 
-        # Import inside function to ensure availability on workers
         import re
-        import nltk
 
-        # Get stopwords - download if needed
-        try:
-            from nltk.corpus import stopwords
-
-            try:
-                nltk.data.find("corpora/stopwords")
-            except LookupError:
-                nltk.download("stopwords", quiet=True)
-            stop_words = set(stopwords.words("english"))
-        except Exception:
-            # Fallback if nltk not available
-            stop_words = set()
+        # Use stopwords captured in closure
+        stop_words = stop_words_set
 
         # Convert to lowercase
         text_lower = text.lower()
@@ -315,7 +390,7 @@ def create_chunks_df(spark: SparkSession, books_df, num_chunks: int = 20):
 
         return words
 
-    # Create preprocessing UDF - defined inside function to avoid module serialization
+    # Create preprocessing UDF
     preprocess_udf = udf(_preprocess_wrapper, ArrayType(StringType()))
 
     # Create chunks

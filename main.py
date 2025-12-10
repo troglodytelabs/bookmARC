@@ -76,9 +76,14 @@ def create_spark_session(app_name: str = "EmoArc", mode: str = "local"):
     # Build Spark session
     builder = SparkSession.builder.appName(app_name)
 
-    # In local mode, limit parallelism to prevent OOM when loading large book files
+    # Set master based on mode
     if is_local and local_parallelism:
+        # Local mode: limit parallelism to prevent OOM when loading large book files
         builder = builder.master(f"local[{local_parallelism}]")
+    elif not is_local:
+        # Cluster mode: use YARN (EMR default)
+        # If running via spark-submit, this may be overridden by spark-submit args
+        builder = builder.master("yarn")
 
     # Always enable adaptive execution (works in both local and cluster)
     builder = builder.config("spark.sql.adaptive.enabled", "true")
