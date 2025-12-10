@@ -418,23 +418,40 @@ def main():
         if args.resume:
             # Check which batches already exist
             trajectories_path = f"{args.output}/trajectories"
-            if os.path.exists(trajectories_path):
+            timings_path = os.path.join(args.output, "timings.json")
+
+            # First, try to use timings.json as the authoritative source
+            if os.path.exists(timings_path):
+                try:
+                    with open(timings_path, "r") as f:
+                        saved_timings = json.load(f)
+                    last_batch = saved_timings.get("stages", {}).get(
+                        "last_completed_batch"
+                    )
+                    if last_batch is not None:
+                        start_batch = last_batch + 1
+                        print(
+                            f"  ✓ Timings show batch {last_batch + 1} was last completed"
+                        )
+                        print(
+                            f"  ✓ Resuming from batch {start_batch + 1} ({start_batch * batch_size} books already processed)"
+                        )
+                except Exception as e:
+                    print(f"  ⚠ Could not read timings file: {e}")
+
+            # Fallback: count books in parquet if timings unavailable
+            if start_batch == 0 and os.path.exists(trajectories_path):
                 try:
                     existing_df = spark.read.parquet(trajectories_path)
-                    existing_ids = set(
-                        row["book_id"]
-                        for row in existing_df.select("book_id").collect()
-                    )
+                    existing_count = existing_df.count()
 
-                    # Find which batches are complete
-                    for i in range(0, len(all_book_ids), batch_size):
-                        batch_ids = set(all_book_ids[i : i + batch_size])
-                        if batch_ids.issubset(existing_ids):
-                            start_batch = (i // batch_size) + 1
-                        else:
-                            break
-
-                    if start_batch > 0:
+                    # Calculate how many complete batches we have
+                    complete_batches = existing_count // batch_size
+                    if complete_batches > 0:
+                        start_batch = complete_batches
+                        print(
+                            f"  ✓ Found {existing_count} books in parquet ({complete_batches} complete batches)"
+                        )
                         print(
                             f"  ✓ Resuming from batch {start_batch + 1} ({start_batch * batch_size} books already processed)"
                         )
