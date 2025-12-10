@@ -7,7 +7,6 @@ import os
 import streamlit as st
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from pyspark.sql import SparkSession
 from pyspark.sql.functions import col
 
 # Add src to path
@@ -64,6 +63,89 @@ def search_books_by_title(title_query, metadata_df, limit=20):
     )
 
     return results
+
+
+def plot_mini_trajectory(emotion_trajectory, title, height=200):
+    """Plot a mini emotion trajectory for a book (used in recommendations)."""
+    try:
+        if emotion_trajectory is None or len(emotion_trajectory) == 0:
+            return None
+
+        # emotion_trajectory is array of [chunk_idx, anger, anticipation, disgust, fear, joy, sadness, surprise, trust]
+        # Indices:                        [0,         1,     2,            3,       4,    5,   6,       7,        8    ]
+
+        # Extract data - handle both list and numpy array
+        chunks = list(range(len(emotion_trajectory)))
+
+        fig = go.Figure()
+
+        # Plot main emotions (Joy, Sadness, Fear) for a cleaner look
+        # Joy=5, Sadness=6, Fear=4 in the array
+        main_emotions = [
+            (5, "Joy", "#f1c40f"),
+            (6, "Sadness", "#3498db"),
+            (4, "Fear", "#2c3e50"),
+        ]
+
+        for idx, name, color in main_emotions:
+            try:
+                values = [float(row[idx]) for row in emotion_trajectory]
+                fig.add_trace(
+                    go.Scatter(
+                        x=chunks,
+                        y=values,
+                        mode="lines",
+                        name=name,
+                        line=dict(color=color, width=2),
+                        opacity=0.7,
+                    )
+                )
+            except (IndexError, TypeError):
+                # Skip this emotion if data is malformed
+                continue
+
+        if len(fig.data) == 0:
+            return None
+
+        fig.update_layout(
+            title=dict(
+                text=f"📈 {title[:30]}..." if len(title) > 30 else f"📈 {title}",
+                font=dict(size=12),
+            ),
+            height=height,
+            margin=dict(l=10, r=10, t=30, b=10),
+            showlegend=True,
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="right",
+                x=1,
+                font=dict(size=9),
+            ),
+            xaxis=dict(showticklabels=False, title=""),
+            yaxis=dict(showticklabels=False, title=""),
+            template="plotly_white",
+        )
+
+        return fig
+    except Exception:
+        # Return None if anything fails - don't crash the app
+        return None
+
+
+def interpret_similarity(similarity, rec_trajectory, input_trajectory):
+    """Generate human-readable interpretation of why books are similar."""
+    if similarity > 0.9:
+        strength = "very similar"
+    elif similarity > 0.8:
+        strength = "similar"
+    elif similarity > 0.7:
+        strength = "somewhat similar"
+    else:
+        strength = "loosely related"
+
+    return f"This book has a **{strength}** emotional arc to your selected book."
 
 
 def plot_topic_distribution(book_topics_pd, book_title, num_topics=10):
@@ -494,40 +576,62 @@ def show_book_analysis_and_recommendations():
                         )
                         st.metric("Number of Chunks", f"{len(chunk_scores_pd)}")
 
-                    # Show trajectory statistics
+                    # Show emotional profile with interpretation
                     trajectory_pd = trajectory.toPandas().iloc[0]
-                    st.subheader("Trajectory Summary")
+                    st.subheader("📊 Emotional Profile")
 
+                    # Calculate emotion ratios for interpretation
+                    avg_emotions = {
+                        "Joy": trajectory_pd.get("avg_joy", 0),
+                        "Trust": trajectory_pd.get("avg_trust", 0),
+                        "Anticipation": trajectory_pd.get("avg_anticipation", 0),
+                        "Surprise": trajectory_pd.get("avg_surprise", 0),
+                        "Sadness": trajectory_pd.get("avg_sadness", 0),
+                        "Fear": trajectory_pd.get("avg_fear", 0),
+                        "Anger": trajectory_pd.get("avg_anger", 0),
+                        "Disgust": trajectory_pd.get("avg_disgust", 0),
+                    }
+                    total_emotion = sum(avg_emotions.values()) or 1
+
+                    # Get dominant emotions
+                    sorted_emotions = sorted(
+                        avg_emotions.items(), key=lambda x: x[1], reverse=True
+                    )
+                    dominant = [e for e, v in sorted_emotions[:3] if v > 0]
+
+                    # Interpret the emotional tone
+                    valence = chunk_scores_pd["avg_valence"].mean()
+                    arousal = chunk_scores_pd["avg_arousal"].mean()
+
+                    # Generate interpretation
+                    tone_desc = (
+                        "positive"
+                        if valence > 0.05
+                        else ("negative" if valence < -0.05 else "neutral")
+                    )
+                    energy_desc = (
+                        "high-energy"
+                        if arousal > 0.05
+                        else ("calm" if arousal < -0.05 else "moderate-paced")
+                    )
+
+                    st.markdown(f"""
+                    **Overall Tone:** This book has a **{tone_desc}** emotional tone with **{energy_desc}** narrative.  
+                    **Dominant Emotions:** {", ".join(dominant) if dominant else "Balanced"}  
+                    """)
+
+                    # Show emotion breakdown as progress bars
+                    st.write("**Emotion Breakdown:**")
                     col1, col2 = st.columns(2)
-                    with col1:
-                        st.write("**Peak Emotions:**")
-                        peak_emotions = {
-                            "Anger": trajectory_pd.get("max_anger", 0),
-                            "Anticipation": trajectory_pd.get("max_anticipation", 0),
-                            "Disgust": trajectory_pd.get("max_disgust", 0),
-                            "Fear": trajectory_pd.get("max_fear", 0),
-                            "Joy": trajectory_pd.get("max_joy", 0),
-                            "Sadness": trajectory_pd.get("max_sadness", 0),
-                            "Surprise": trajectory_pd.get("max_surprise", 0),
-                            "Trust": trajectory_pd.get("max_trust", 0),
-                        }
-                        for emotion, value in peak_emotions.items():
-                            st.write(f"- {emotion}: {value:.2f}")
 
-                    with col2:
-                        st.write("**Average Emotions:**")
-                        avg_emotions = {
-                            "Anger": trajectory_pd.get("avg_anger", 0),
-                            "Anticipation": trajectory_pd.get("avg_anticipation", 0),
-                            "Disgust": trajectory_pd.get("avg_disgust", 0),
-                            "Fear": trajectory_pd.get("avg_fear", 0),
-                            "Joy": trajectory_pd.get("avg_joy", 0),
-                            "Sadness": trajectory_pd.get("avg_sadness", 0),
-                            "Surprise": trajectory_pd.get("avg_surprise", 0),
-                            "Trust": trajectory_pd.get("avg_trust", 0),
-                        }
-                        for emotion, value in avg_emotions.items():
-                            st.write(f"- {emotion}: {value:.4f}")
+                    emotions_list = list(avg_emotions.items())
+                    for i, (emotion, value) in enumerate(emotions_list):
+                        ratio = value / total_emotion if total_emotion > 0 else 0
+                        with col1 if i < 4 else col2:
+                            st.progress(
+                                min(ratio * 2, 1.0),
+                                text=f"{emotion}: {ratio * 100:.1f}%",
+                            )
 
                     # Display topic modeling if available
                     if book_topics is not None:
@@ -626,38 +730,94 @@ def show_book_analysis_and_recommendations():
                                 f"Top {top_n} recommendations for: **{title}** by {author}"
                             )
 
+                            st.markdown("""
+                            > 📖 **How to read this:** Books are ranked by how similar their emotional journey is to your selected book.
+                            > Higher similarity = more similar emotional arc throughout the narrative.
+                            """)
+
                             recs_pd = recommendations.toPandas()
 
+                            # Get input book's trajectory for comparison
+                            input_traj = (
+                                trajectory.toPandas()
+                                .iloc[0]
+                                .get("emotion_trajectory", None)
+                            )
+
                             for idx, row in recs_pd.iterrows():
+                                similarity = row["similarity"]
+                                # Determine similarity badge
+                                if similarity > 0.9:
+                                    badge = "🎯 Very Similar"
+                                elif similarity > 0.8:
+                                    badge = "✨ Similar"
+                                elif similarity > 0.7:
+                                    badge = "📚 Related"
+                                else:
+                                    badge = "🔗 Loosely Related"
+
                                 with st.expander(
-                                    f"{idx + 1}. {row['title']} by {row['author']} "
-                                    f"(Similarity: {row['similarity']:.4f})"
+                                    f"{idx + 1}. {row['title']} by {row['author']} — {badge} ({similarity:.0%})"
                                 ):
+                                    # Interpretation
+                                    rec_traj = row.get("emotion_trajectory", None)
+                                    st.markdown(
+                                        interpret_similarity(
+                                            similarity, rec_traj, input_traj
+                                        )
+                                    )
+
+                                    # Show mini trajectory if available
+                                    if rec_traj is not None and len(rec_traj) > 0:
+                                        fig = plot_mini_trajectory(
+                                            rec_traj, row["title"]
+                                        )
+                                        if fig:
+                                            st.plotly_chart(fig, width="stretch")
+
+                                    # Emotion profile summary
                                     col1, col2 = st.columns(2)
                                     with col1:
-                                        st.write("**Emotion Scores:**")
-                                        st.write(f"- Joy: {row.get('avg_joy', 0):.4f}")
-                                        st.write(
-                                            f"- Sadness: {row.get('avg_sadness', 0):.4f}"
+                                        st.write("**Emotional Tone:**")
+                                        valence = row.get("avg_valence", 0)
+                                        arousal = row.get("avg_arousal", 0)
+                                        tone = (
+                                            "Positive"
+                                            if valence > 0.05
+                                            else (
+                                                "Negative"
+                                                if valence < -0.05
+                                                else "Neutral"
+                                            )
                                         )
-                                        st.write(
-                                            f"- Fear: {row.get('avg_fear', 0):.4f}"
+                                        energy = (
+                                            "High-energy"
+                                            if arousal > 0.05
+                                            else (
+                                                "Calm"
+                                                if arousal < -0.05
+                                                else "Moderate"
+                                            )
                                         )
-                                        st.write(
-                                            f"- Anger: {row.get('avg_anger', 0):.4f}"
-                                        )
+                                        st.write(f"• Tone: {tone}")
+                                        st.write(f"• Energy: {energy}")
 
                                     with col2:
-                                        st.write("**VAD Scores:**")
-                                        st.write(
-                                            f"- Valence: {row.get('avg_valence', 0):.4f}"
+                                        st.write("**Dominant Emotions:**")
+                                        emotions = {
+                                            "Joy": row.get("avg_joy", 0),
+                                            "Trust": row.get("avg_trust", 0),
+                                            "Fear": row.get("avg_fear", 0),
+                                            "Sadness": row.get("avg_sadness", 0),
+                                        }
+                                        sorted_emo = sorted(
+                                            emotions.items(),
+                                            key=lambda x: x[1],
+                                            reverse=True,
                                         )
-                                        st.write(
-                                            f"- Arousal: {row.get('avg_arousal', 0):.4f}"
-                                        )
-                                        st.write(
-                                            f"- Dominance: {row.get('avg_dominance', 0):.4f}"
-                                        )
+                                        for emo, val in sorted_emo[:3]:
+                                            if val > 0:
+                                                st.write(f"• {emo}")
 
                             # Download button
                             csv = recs_pd.to_csv(index=False)
@@ -948,33 +1108,68 @@ def show_find_books_by_emotions():
                     f"Found {len(matching_books_pd)} books matching your preferences!"
                 )
 
+                st.markdown("""
+                > 📖 **Match Score** indicates how well the book's emotional profile matches your preferences.
+                > Higher = better match to your selected vibe.
+                """)
+
                 # Display results
                 for idx, row in matching_books_pd.iterrows():
-                    with st.expander(
-                        f"{idx + 1}. {row['title']} by {row['author']} "
-                        f"(Match: {row['match_score']:.3f})"
-                    ):
-                        col1, col2 = st.columns(2)
+                    match_score = row["match_score"]
+                    # Determine match quality
+                    if match_score > 0.8:
+                        badge = "🎯 Excellent Match"
+                    elif match_score > 0.6:
+                        badge = "✨ Good Match"
+                    elif match_score > 0.4:
+                        badge = "📚 Fair Match"
+                    else:
+                        badge = "🔗 Partial Match"
 
+                    with st.expander(
+                        f"{idx + 1}. {row['title']} by {row['author']} — {badge} ({match_score:.0%})"
+                    ):
+                        # Show trajectory if available
+                        rec_traj = row.get("emotion_trajectory", None)
+                        if rec_traj is not None and len(rec_traj) > 0:
+                            fig = plot_mini_trajectory(rec_traj, row["title"])
+                            if fig:
+                                st.plotly_chart(fig, width="stretch")
+
+                        # Emotional profile
+                        col1, col2 = st.columns(2)
                         with col1:
-                            st.write("**Emotion Scores:**")
-                            st.write(f"- Joy: {row.get('avg_joy', 0):.4f}")
-                            st.write(f"- Sadness: {row.get('avg_sadness', 0):.4f}")
-                            st.write(f"- Fear: {row.get('avg_fear', 0):.4f}")
-                            st.write(f"- Anger: {row.get('avg_anger', 0):.4f}")
+                            st.write("**Emotional Tone:**")
+                            valence = row.get("avg_valence", 0)
+                            arousal = row.get("avg_arousal", 0)
+                            tone = (
+                                "Positive"
+                                if valence > 0.05
+                                else ("Negative" if valence < -0.05 else "Neutral")
+                            )
+                            energy = (
+                                "High-energy"
+                                if arousal > 0.05
+                                else ("Calm" if arousal < -0.05 else "Moderate")
+                            )
+                            st.write(f"• Tone: {tone}")
+                            st.write(f"• Energy: {energy}")
 
                         with col2:
-                            st.write("**More Emotions:**")
-                            st.write(
-                                f"- Anticipation: {row.get('avg_anticipation', 0):.4f}"
+                            st.write("**Dominant Emotions:**")
+                            emotions = {
+                                "Joy": row.get("avg_joy", 0),
+                                "Trust": row.get("avg_trust", 0),
+                                "Anticipation": row.get("avg_anticipation", 0),
+                                "Fear": row.get("avg_fear", 0),
+                                "Sadness": row.get("avg_sadness", 0),
+                            }
+                            sorted_emo = sorted(
+                                emotions.items(), key=lambda x: x[1], reverse=True
                             )
-                            st.write(f"- Surprise: {row.get('avg_surprise', 0):.4f}")
-                            st.write(f"- Trust: {row.get('avg_trust', 0):.4f}")
-                            st.write(f"- Disgust: {row.get('avg_disgust', 0):.4f}")
-
-                        st.write("**VAD Scores:**")
-                        st.write(f"- Valence: {row.get('avg_valence', 0):.4f}")
-                        st.write(f"- Arousal: {row.get('avg_arousal', 0):.4f}")
+                            for emo, val in sorted_emo[:3]:
+                                if val > 0:
+                                    st.write(f"• {emo}")
 
                 # Download button
                 csv = matching_books_pd.to_csv(index=False)
@@ -992,22 +1187,29 @@ def show_about():
     st.markdown("""
     **EmoArc** is an emotion trajectory analysis and recommendation system for Project Gutenberg books.
     
-    ### Features:
+    ### Features
     - **Emotion Analysis**: Analyze emotion trajectories using NRC Emotion Lexicon (8 Plutchik emotions)
-    - **VAD Analysis**: Analyze Valence-Arousal-Dominance scores
-    - **Recommendations**: Get book recommendations based on similar emotion trajectories
-    - **Visualizations**: Interactive plots showing emotion trajectories over time
+    - **VAD Analysis**: Analyze Valence-Arousal-Dominance (pleasantness, intensity, control) scores
+    - **Recommendations**: Get book recommendations based on similar emotional journeys
+    - **Visualizations**: Interactive plots showing how emotions flow through the narrative
     
-    ### How it works:
-    1. Books are segmented into percentage-based chunks (default: 50 chunks per book)
-    2. Each chunk is scored using NRC Emotion and VAD lexicons
-    3. Emotion trajectories are analyzed to identify patterns
-    4. Similar books are found using feature-based similarity
+    ### How it works
+    1. **Chunking**: Books are divided into 20 equal segments (5% each) to track emotional progression
+    2. **Emotion Scoring**: Each chunk is scored using the NRC Emotion Lexicon for 8 emotions (joy, trust, anticipation, surprise, fear, sadness, anger, disgust)
+    3. **VAD Scoring**: Valence (positive/negative), Arousal (calm/excited), and Dominance (in-control/controlled) are computed
+    4. **Trajectory Analysis**: The sequence of emotions across chunks forms the "emotional arc" of the book
+    5. **Similarity Matching**: Books with similar emotional arcs are recommended together
     
-    ### Technical Details:
-    - Built with Apache Spark for big data processing
-    - Uses NRC Emotion Lexicon and NRC VAD Lexicon
-    - Processes 75,000+ books from Project Gutenberg
+    ### Understanding the Scores
+    - **Similarity %**: How closely two books' emotional journeys match (higher = more similar arcs)
+    - **Emotional Tone**: Positive/Neutral/Negative based on overall valence
+    - **Energy**: High-energy/Moderate/Calm based on arousal levels
+    - **Dominant Emotions**: The emotions that appear most frequently in the text
+    
+    ### Technical Details
+    - Built with Apache Spark for scalable big data processing
+    - Uses NRC Emotion Lexicon (Plutchik's 8 emotions) and NRC VAD Lexicon
+    - Word embeddings (Word2Vec) and topic modeling (LDA) for enhanced recommendations
     
     ### Usage:
     1. Run `python main.py` to generate trajectories for all books

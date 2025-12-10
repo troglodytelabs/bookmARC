@@ -151,7 +151,10 @@ def compute_feature_similarity(
                     )
                 )
             ),
-        ).select(
+        )
+
+        # Include emotion_trajectory if available
+        select_cols = [
             "book_id",
             "title",
             "author",
@@ -166,7 +169,11 @@ def compute_feature_similarity(
             "avg_trust",
             "avg_valence",
             "avg_arousal",
-        )
+        ]
+        if "emotion_trajectory" in other_books.columns:
+            select_cols.append("emotion_trajectory")
+
+        feature_sim_df = feature_sim_df.select(*select_cols)
 
         return feature_sim_df
 
@@ -315,23 +322,29 @@ def compute_feature_similarity(
                 )
             ),
         )
-        .select(
-            "book_id",
-            "title",
-            "author",
-            "feature_similarity",
-            "avg_anger",
-            "avg_anticipation",
-            "avg_disgust",
-            "avg_fear",
-            "avg_joy",
-            "avg_sadness",
-            "avg_surprise",
-            "avg_trust",
-            "avg_valence",
-            "avg_arousal",
-        )
     )
+
+    # Include emotion_trajectory if available
+    select_cols = [
+        "book_id",
+        "title",
+        "author",
+        "feature_similarity",
+        "avg_anger",
+        "avg_anticipation",
+        "avg_disgust",
+        "avg_fear",
+        "avg_joy",
+        "avg_sadness",
+        "avg_surprise",
+        "avg_trust",
+        "avg_valence",
+        "avg_arousal",
+    ]
+    if "emotion_trajectory" in other_books.columns:
+        select_cols.append("emotion_trajectory")
+
+    feature_sim_df = feature_sim_df.select(*select_cols)
 
     return feature_sim_df
 
@@ -655,25 +668,29 @@ def recommend(
     combined_df = combined_df.withColumn("similarity", similarity_expr)
 
     # Select final columns and order by similarity
+    select_cols = [
+        "book_id",
+        "title",
+        "author",
+        "similarity",
+        "avg_anger",
+        "avg_anticipation",
+        "avg_disgust",
+        "avg_fear",
+        "avg_joy",
+        "avg_sadness",
+        "avg_surprise",
+        "avg_trust",
+        "avg_valence",
+        "avg_arousal",
+    ]
+
+    # Include emotion_trajectory for visualization if available
+    if "emotion_trajectory" in combined_df.columns:
+        select_cols.append("emotion_trajectory")
+
     result = (
-        combined_df.select(
-            "book_id",
-            "title",
-            "author",
-            "similarity",
-            "avg_anger",
-            "avg_anticipation",
-            "avg_disgust",
-            "avg_fear",
-            "avg_joy",
-            "avg_sadness",
-            "avg_surprise",
-            "avg_trust",
-            "avg_valence",
-            "avg_arousal",
-        )
-        .orderBy(col("similarity").desc())
-        .limit(top_n)
+        combined_df.select(*select_cols).orderBy(col("similarity").desc()).limit(top_n)
     )
 
     return result
