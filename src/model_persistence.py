@@ -43,7 +43,7 @@ def load_models(output_dir):
         Dictionary with loaded models, or empty dict if not found
     """
     from pyspark.ml.feature import Word2VecModel, CountVectorizerModel
-    from pyspark.ml.clustering import LDAModel
+    from pyspark.ml.clustering import DistributedLDAModel, LocalLDAModel
 
     models = {}
     models_dir = os.path.join(output_dir, "models")
@@ -62,10 +62,16 @@ def load_models(output_dir):
     lda_path = os.path.join(models_dir, "lda")
     if os.path.exists(lda_path):
         try:
-            models["lda"] = LDAModel.load(lda_path)
+            # Try DistributedLDAModel first (default from LDA.fit())
+            models["lda"] = DistributedLDAModel.load(lda_path)
             print(f"  ✓ Loaded LDA model from {lda_path}")
-        except Exception as e:
-            print(f"  ⚠ Could not load LDA model: {e}")
+        except Exception:
+            try:
+                # Fall back to LocalLDAModel
+                models["lda"] = LocalLDAModel.load(lda_path)
+                print(f"  ✓ Loaded LDA model from {lda_path}")
+            except Exception as e:
+                print(f"  ⚠ Could not load LDA model: {e}")
 
     cv_path = os.path.join(models_dir, "count_vectorizer")
     if os.path.exists(cv_path):

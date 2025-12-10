@@ -431,7 +431,7 @@ def main():
                     if last_batch is not None:
                         start_batch = last_batch + 1
                         print(
-                            f"  ✓ Timings show batch {last_batch + 1} was last completed"
+                            f"  ✓ Timings show last_completed_batch={last_batch} (batch {last_batch + 1} of {(len(all_book_ids) + batch_size - 1) // batch_size})"
                         )
                         print(
                             f"  ✓ Resuming from batch {start_batch + 1} ({start_batch * batch_size} books already processed)"

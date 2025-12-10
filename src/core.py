@@ -24,11 +24,10 @@ from text_preprocessor import create_chunks_df
 from emotion_scorer import score_chunks
 from trajectory_analyzer import analyze_trajectory
 from topic_modeling import (
-    prepare_topic_features,
-    train_lda,
     get_chunk_topics,
     compute_book_topics,
 )
+from model_persistence import load_models
 
 
 def create_spark_session(app_name: str = "EmoArc"):
@@ -167,16 +166,21 @@ def get_input_trajectory(
             chunk_scores = score_chunks(spark, chunks_df, emotion_df, vad_df)
             trajectory = analyze_trajectory(spark, chunk_scores)
 
-            # Compute topics if requested
+            # Compute topics if requested (using pre-trained models)
             if compute_topics:
-                feature_df, _ = prepare_topic_features(
-                    spark, chunks_df, vocab_size=5000, min_df=2
-                )
-                lda_model = train_lda(
-                    spark, feature_df, num_topics=num_topics, max_iter=50
-                )
-                chunk_topics = get_chunk_topics(spark, feature_df, lda_model)
-                book_topics = compute_book_topics(spark, chunk_topics)
+                models = load_models(output_dir)
+                if models.get("lda") and models.get("cv_model"):
+                    # Use pre-trained CountVectorizer and LDA
+                    word_sequences = chunks_df.select(
+                        "book_id", "chunk_index", col("words")
+                    )
+                    feature_df = models["cv_model"].transform(word_sequences)
+                    chunk_topics = get_chunk_topics(spark, feature_df, models["lda"])
+                    book_topics = compute_book_topics(spark, chunk_topics)
+                else:
+                    print(
+                        "  ⚠ No pre-trained LDA model found. Run main.py first for topic analysis."
+                    )
 
         except Exception as e:
             raise RuntimeError(f"Error processing text file: {e}")
@@ -266,14 +270,21 @@ def get_input_trajectory(
         if not trajectory_found:
             trajectory = analyze_trajectory(spark, chunk_scores)
 
-        # Compute topics if requested
+        # Compute topics if requested (using pre-trained models)
         if compute_topics:
-            feature_df, _ = prepare_topic_features(
-                spark, chunks_df, vocab_size=5000, min_df=2
-            )
-            lda_model = train_lda(spark, feature_df, num_topics=num_topics, max_iter=50)
-            chunk_topics = get_chunk_topics(spark, feature_df, lda_model)
-            book_topics = compute_book_topics(spark, chunk_topics)
+            models = load_models(output_dir)
+            if models.get("lda") and models.get("cv_model"):
+                # Use pre-trained CountVectorizer and LDA
+                word_sequences = chunks_df.select(
+                    "book_id", "chunk_index", col("words")
+                )
+                feature_df = models["cv_model"].transform(word_sequences)
+                chunk_topics = get_chunk_topics(spark, feature_df, models["lda"])
+                book_topics = compute_book_topics(spark, chunk_topics)
+            else:
+                print(
+                    "  ⚠ No pre-trained LDA model found. Run main.py first for topic analysis."
+                )
 
     else:
         raise ValueError("No input specified! Please provide book_id or text_file.")
