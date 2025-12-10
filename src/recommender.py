@@ -72,7 +72,7 @@ WEIGHT_PRESETS = {
 }
 
 
-def get_weight_preset(preset_name: str = "balanced") -> dict:
+def get_weight_preset(preset_name: str = "similar_experience") -> dict:
     """
     Get weight configuration for a specific use case.
 
@@ -83,7 +83,7 @@ def get_weight_preset(preset_name: str = "balanced") -> dict:
     Returns:
         Dictionary with weight values
     """
-    return WEIGHT_PRESETS.get(preset_name, WEIGHT_PRESETS["balanced"])
+    return WEIGHT_PRESETS.get(preset_name, WEIGHT_PRESETS["similar_experience"])
 
 
 def compute_feature_similarity(
@@ -705,7 +705,7 @@ def recommend(
     topic_weight: float = 0.15,
     genre_weight: float = 0.2,
     metadata_df=None,
-    preset: str = None,
+    preset: str = "similar_experience",
 ):
     """
     Recommend books with similar emotion trajectories.

@@ -478,8 +478,8 @@ def show_book_analysis_and_recommendations():
 
         # Recommendation preset selector
         preset_options = {
-            "balanced": "🎯 Balanced (default)",
-            "similar_experience": "📖 Similar Reading Experience",
+            "similar_experience": "📖 Similar Reading Experience (default)",
+            "balanced": "🎯 Balanced",
             "similar_themes": "💡 Similar Themes & Topics",
             "similar_style": "✍️ Similar Writing Style",
             "genre_focused": "📚 Same Genre/Category",
