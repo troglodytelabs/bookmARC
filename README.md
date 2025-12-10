@@ -237,7 +237,7 @@ aws s3 mb s3://your-bucket-name
 aws s3 sync data/ s3://your-bucket-name/data/
 
 # Package source code as zip (required for PySpark to find modules)
-cd src && zip -r ../src.zip . && cd ..
+cd src && zip -r ../src.zip . -x "./__pycache__/*" -x "*/__pycache__/*" && cd ..
 
 # Upload main.py and src.zip
 aws s3 cp main.py s3://your-bucket-name/

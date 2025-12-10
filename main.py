@@ -4,6 +4,9 @@ Main pipeline for emotion trajectory analysis.
 
 import sys
 import os
+import time
+import json
+from datetime import datetime
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col
 
@@ -227,21 +230,31 @@ def main():
     # Create Spark session with specified mode
     spark = create_spark_session(mode=args.mode)
 
+    # Track timing for each stage
+    timings = {}
+    pipeline_start = time.time()
+
     try:
         # Step 1: Load lexicons (small, safe to cache)
         print("\n[Step 1/6] Loading lexicons...")
+        stage_start = time.time()
         emotion_df = load_emotion_lexicon(spark, args.emotion_lexicon)
         vad_df = load_vad_lexicon(spark, args.vad_lexicon)
         # Cache lexicons - they're small and reused for every chunk
         emotion_df.cache()
         vad_df.cache()
-        print(f"  ✓ Loaded {emotion_df.count()} emotion word-emotion pairs")
-        print(f"  ✓ Loaded {vad_df.count()} VAD terms")
+        emotion_count = emotion_df.count()
+        vad_count = vad_df.count()
+        timings["1_lexicon_loading"] = time.time() - stage_start
+        print(f"  ✓ Loaded {emotion_count} emotion word-emotion pairs")
+        print(f"  ✓ Loaded {vad_count} VAD terms")
+        print(f"  ⏱ Time: {timings['1_lexicon_loading']:.2f}s")
 
         # Step 2+3: Load books AND create chunks in optimized single pipeline
         # This never materializes the full text column - goes directly from
         # file content → words, which is much more memory efficient
         print("\n[Step 2/6] Loading books and creating chunks...")
+        stage_start = time.time()
         chunks_df = load_and_chunk_books(
             spark,
             args.books_dir,
@@ -257,10 +270,13 @@ def main():
         chunks_df.persist(StorageLevel.MEMORY_AND_DISK)
         chunk_count = chunks_df.count()
         book_count = chunks_df.select("book_id").distinct().count()
+        timings["2_text_preprocessing"] = time.time() - stage_start
         print(f"  ✓ Loaded {book_count} books, created {chunk_count} chunks")
+        print(f"  ⏱ Time: {timings['2_text_preprocessing']:.2f}s")
 
         # Step 4: Score chunks with emotions AND VAD in one pass
         print("\n[Step 3/6] Scoring chunks with emotions and VAD...")
+        stage_start = time.time()
         chunk_scores = score_chunks(spark, chunks_df, emotion_df, vad_df)
         # Don't cache chunk_scores - let Spark pipeline it through to trajectories
 
@@ -271,7 +287,9 @@ def main():
         # Filter out books with no chunks (shouldn't happen, but safety check)
         trajectories = trajectories.filter(col("num_chunks") > 0)
         trajectory_count = trajectories.count()
+        timings["3_emotion_scoring_and_trajectories"] = time.time() - stage_start
         print(f"  ✓ Analyzed {trajectory_count} book trajectories")
+        print(f"  ⏱ Time: {timings['3_emotion_scoring_and_trajectories']:.2f}s")
 
         # Step 5: Compute word embeddings and topic distributions
         # Note: Embeddings and topics are computed at BOOK level for recommendations
@@ -281,6 +299,7 @@ def main():
 
         if not args.skip_embeddings:
             print("\n[Step 5a/5] Computing word embeddings...")
+            stage_start = time.time()
             # Reuse persisted chunks_df
             print("  Training Word2Vec model...")
             word2vec_model = train_word2vec(
@@ -299,15 +318,19 @@ def main():
 
             print("  Aggregating to book-level embeddings...")
             book_embeddings = compute_book_embedding(spark, chunk_embeddings)
-            book_count = book_embeddings.count()
-            print(f"  ✓ Computed embeddings for {book_count} books")
+            book_emb_count = book_embeddings.count()
+            timings["4_word_embeddings"] = time.time() - stage_start
+            print(f"  ✓ Computed embeddings for {book_emb_count} books")
+            print(f"  ⏱ Time: {timings['4_word_embeddings']:.2f}s")
 
             chunk_embeddings.unpersist()
         else:
             print("\n[Step 5a/5] Skipping word embeddings (--skip-embeddings)")
+            timings["4_word_embeddings"] = 0
 
         if not args.skip_topics:
             print("\n[Step 5b/5] Computing topic distributions...")
+            stage_start = time.time()
             # Reuse persisted chunks_df
             print("  Preparing topic features...")
             feature_df, cv_model = prepare_topic_features(
@@ -331,12 +354,15 @@ def main():
             print("  Aggregating to book-level topics...")
             book_topics = compute_book_topics(spark, chunk_topics)
             topic_count = book_topics.count()
+            timings["5_topic_modeling"] = time.time() - stage_start
             print(f"  ✓ Computed topics for {topic_count} books")
+            print(f"  ⏱ Time: {timings['5_topic_modeling']:.2f}s")
 
             feature_df.unpersist()
             chunk_topics.unpersist()
         else:
             print("\n[Step 6b/6] Skipping topic modeling (--skip-topics)")
+            timings["5_topic_modeling"] = 0
 
         # Now unpersist chunks_df as all processing is complete
         chunks_df.unpersist()
@@ -360,13 +386,19 @@ def main():
         # Save results as Parquet (efficient columnar format with full type support)
         # Only save trajectories - chunk_scores are intermediate and not needed for recommendations
         print(f"\n[Saving] Writing results to {args.output}/...")
+        stage_start = time.time()
 
         # Save trajectories (includes embeddings, topics, emotion trajectories)
         # This is the only file needed for recommendations
         trajectories.write.mode("overwrite").parquet(f"{args.output}/trajectories")
+        timings["6_save_results"] = time.time() - stage_start
         print(f"  ✓ Trajectories saved to {args.output}/trajectories")
+        print(f"  ⏱ Time: {timings['6_save_results']:.2f}s")
 
         print("  ✓ Results saved successfully!")
+
+        # Calculate total time
+        timings["total"] = time.time() - pipeline_start
 
         # Show sample results
         print("\n" + "=" * 80)
@@ -377,8 +409,35 @@ def main():
             "book_id", "title", "author", "avg_joy", "avg_sadness", "avg_valence"
         ).show(10, truncate=False)
 
+        # Print timing summary
+        print("\n" + "=" * 80)
+        print("TIMING SUMMARY")
+        print("=" * 80)
+        for stage, t in sorted(timings.items()):
+            if stage != "total":
+                pct = t / timings["total"] * 100
+                print(f"  {stage:<35} {t:>8.2f}s  ({pct:>5.1f}%)")
+        print("  " + "-" * 50)
+        print(f"  {'TOTAL':<35} {timings['total']:>8.2f}s")
+
+        # Save timings to JSON
+        timings_data = {
+            "timestamp": datetime.now().isoformat(),
+            "stages": {k: round(v, 2) for k, v in timings.items()},
+            "percentages": {
+                k: round(v / timings["total"] * 100, 1)
+                for k, v in timings.items()
+                if k != "total"
+            },
+        }
+        timings_file = os.path.join(args.output, "timings.json")
+        with open(timings_file, "w") as f:
+            json.dump(timings_data, f, indent=2)
+        print(f"\n  ✓ Timings saved to {timings_file}")
+
         print("\n" + "=" * 80)
         print("Pipeline completed successfully!")
+        print("Run 'python evaluate.py' for evaluation metrics.")
         print("=" * 80)
 
     except Exception as e:
