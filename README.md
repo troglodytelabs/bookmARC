@@ -1,4 +1,4 @@
-# EmoArc - Emotion Trajectory Analysis and Recommendation System
+# BookmARC - Emotion Trajectory Analysis and Recommendation System
 
 A Spark-based big data analytics project that analyzes emotion trajectories in Project Gutenberg books and provides book recommendations based on emotional story arcs.
 
