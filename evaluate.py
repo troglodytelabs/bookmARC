@@ -17,7 +17,14 @@ from datetime import datetime
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
 
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import avg, stddev, min as spark_min, max as spark_max
+from pyspark.sql.functions import (
+    avg,
+    stddev,
+    min as spark_min,
+    max as spark_max,
+    col,
+    desc,
+)
 from recommender import recommend, WEIGHT_PRESETS
 
 
@@ -116,6 +123,17 @@ def evaluate_recommendations(spark, trajectories, metadata_df, test_books):
         top_rec = recs_list[0]
         avg_sim = sum(similarities[:5]) / min(5, len(similarities))
 
+        # Check genre overlap
+        top_rec_genres = set()
+        if "common_genres" in top_rec and top_rec["common_genres"]:
+            # If common_genres is available (from recommender), use it
+            # But recommender returns intersection with input book, so if > 0, it's a match
+            if len(top_rec["common_genres"]) > 0:
+                top_rec_genres = set(top_rec["common_genres"])
+
+        # Fallback: we don't have explicit genres of recommended book here easily without lookup
+        # But we can check if the input book's expected genres are in the common_genres list
+
         print(
             f"    ✓ {book_name[:30]:<30} → {top_rec['title'][:25]:<25} (sim: {top_rec['similarity']:.3f}, time: {eval_time:.2f}s)"
         )
@@ -126,15 +144,37 @@ def evaluate_recommendations(spark, trajectories, metadata_df, test_books):
                 "book_name": book_name,
                 "expected_genres": expected_genres,
                 "top_recommendation": top_rec["title"],
+                "top_rec_id": top_rec["book_id"],
                 "top_similarity": top_rec["similarity"],
                 "avg_top5_similarity": avg_sim,
                 "eval_time_seconds": eval_time,
                 "top_5": [
-                    {"title": r["title"], "similarity": r["similarity"]}
+                    {
+                        "title": r["title"],
+                        "similarity": r["similarity"],
+                        "book_id": r["book_id"],
+                    }
                     for r in recs_list[:5]
                 ],
             }
         )
+
+    # Calculate Reciprocity (A->B implies B->A)
+    reciprocal_pairs = 0
+    total_pairs = 0
+
+    # Create a map of book_id -> top_rec_id
+    rec_map = {r["book_id"]: r["top_rec_id"] for r in results}
+
+    for book_id, top_rec_id in rec_map.items():
+        # Check if the recommended book also recommends the original book
+        # We only know this if the recommended book was ALSO in our test set
+        if top_rec_id in rec_map:
+            total_pairs += 1
+            if rec_map[top_rec_id] == book_id:
+                reciprocal_pairs += 1
+
+    reciprocity_rate = reciprocal_pairs / total_pairs if total_pairs > 0 else 0
 
     # Aggregate statistics
     stats = {}
@@ -166,9 +206,40 @@ def evaluate_recommendations(spark, trajectories, metadata_df, test_books):
         "per_book_results": results,
         "similarity_stats": stats,
         "performance_stats": perf_stats,
+        "reciprocity_rate": reciprocity_rate,
         "books_tested": len(results),
         "books_skipped": len(test_books) - len(results),
     }
+
+
+def find_superlatives(trajectories):
+    """Find books with extreme emotion values."""
+    superlatives = {}
+
+    # Define metrics to look for
+    # Use ratio_* columns for emotions to get normalized proportions (0-1)
+    # Use avg_* columns for VAD as they are already normalized scores
+    metrics = [
+        ("Happiest", "ratio_joy", True),
+        ("Saddest", "ratio_sadness", True),
+        ("Most Exciting", "avg_arousal", True),
+        ("Calmest", "avg_arousal", False),
+        ("Most Positive", "avg_valence", True),
+        ("Most Negative", "avg_valence", False),
+        ("Most Intense", "avg_dominance", True),  # Proxy for intensity/dominance
+    ]
+
+    for label, col_name, is_max in metrics:
+        order = col(col_name).desc() if is_max else col(col_name).asc()
+        row = trajectories.select("title", "author", col_name).orderBy(order).first()
+        if row:
+            superlatives[label] = {
+                "title": row["title"],
+                "author": row["author"],
+                "value": row[col_name],
+            }
+
+    return superlatives
 
 
 def evaluate_preset_comparison(spark, trajectories, metadata_df, book_id="11"):
@@ -189,16 +260,19 @@ def evaluate_preset_comparison(spark, trajectories, metadata_df, book_id="11"):
 
         if recs:
             recs_list = recs.collect()
-            preset_results[preset_name] = {
-                "weights": WEIGHT_PRESETS[preset_name],
-                "recommendations": [
-                    {"title": r["title"], "similarity": r["similarity"]}
-                    for r in recs_list
-                ],
-            }
-            print(
-                f"    {preset_name}: {recs_list[0]['title'][:40]} ({recs_list[0]['similarity']:.3f})"
-            )
+            if len(recs_list) > 0:
+                preset_results[preset_name] = {
+                    "weights": WEIGHT_PRESETS[preset_name],
+                    "recommendations": [
+                        {"title": r["title"], "similarity": r["similarity"]}
+                        for r in recs_list
+                    ],
+                }
+                print(
+                    f"    {preset_name}: {recs_list[0]['title'][:40]} ({recs_list[0]['similarity']:.3f})"
+                )
+            else:
+                print(f"    {preset_name}: no recommendations")
 
     return preset_results
 
@@ -269,27 +343,50 @@ def print_summary(eval_data):
     perf_stats = rec_quality["performance_stats"]
 
     print(f"\n📊 Recommendation Quality ({rec_quality['books_tested']} books tested)")
+    print(f"   Average Match Score: {sim_stats['mean'] * 100:.1f}%")
     print(
-        f"   Similarity: mean={sim_stats['mean']:.4f}, median={sim_stats['median']:.4f}, std={sim_stats['std']:.4f}"
+        f"   Reciprocity Rate:    {rec_quality.get('reciprocity_rate', 0) * 100:.1f}% (pairs that recommend each other)"
     )
-    print(f"   Range: [{sim_stats['min']:.4f}, {sim_stats['max']:.4f}]")
-    print(
-        f"   Performance: {perf_stats['mean_time']:.2f}s avg, {perf_stats['total_time']:.2f}s total"
-    )
+    print(f"   Performance:         {perf_stats['mean_time']:.2f}s per recommendation")
+
+    # Superlatives
+    if "superlatives" in eval_data:
+        print("\n🏆 Corpus Superlatives")
+        for label, data in eval_data["superlatives"].items():
+            val_str = f"{data['value']:.2f}"
+            print(f"   {label:<15} {data['title'][:40]:<40} ({val_str})")
 
     # Emotion distribution
-    print("\n📈 Emotion Distribution (Plutchik's 8)")
+    print("\n📈 Emotion Profile")
     emotion_stats = eval_data["emotion_distribution"]
     sorted_emotions = sorted(
         emotion_stats.items(), key=lambda x: x[1]["mean"], reverse=True
     )
+
+    # Print top 3 dominant emotions
+    top_3 = [e[0].capitalize() for e in sorted_emotions[:3]]
+    print(f"   Dominant Emotions: {', '.join(top_3)}")
+
+    print("\n   Full Distribution:")
     for emotion, stats in sorted_emotions:
-        print(f"   {emotion:<15} {stats['mean']:.4f} ± {stats['std']:.4f}")
+        print(
+            f"   {emotion:<15} {stats['mean'] * 100:.1f}% ± {stats['std'] * 100:.1f}%"
+        )
 
     # VAD
-    print("\n🎭 VAD Distribution")
-    for dim, stats in eval_data["vad_distribution"].items():
-        print(f"   {dim:<12} {stats['mean']:+.4f} ± {stats['std']:.4f}")
+    print("\n🎭 VAD Analysis")
+    vad = eval_data["vad_distribution"]
+
+    # Interpret VAD
+    val_mean = vad["valence"]["mean"]
+    arousal_mean = vad["arousal"]["mean"]
+
+    sentiment = "Positive" if val_mean > 0 else "Negative"
+    energy = "High Energy" if arousal_mean > 0 else "Calm/Reflective"
+
+    print(f"   Overall Tone: {sentiment} & {energy}")
+    print(f"   Valence (Pos/Neg): {val_mean:+.2f}")
+    print(f"   Arousal (Calm/Exc): {arousal_mean:+.2f}")
 
 
 def main():
@@ -342,6 +439,7 @@ def main():
         print("\n[4/4] Analyzing distributions...")
         emotion_dist = evaluate_emotion_distribution(trajectories)
         vad_dist = evaluate_vad_distribution(trajectories)
+        superlatives = find_superlatives(trajectories)
 
         # Compile results
         eval_data = {
@@ -351,6 +449,7 @@ def main():
             "preset_comparison": preset_comparison,
             "emotion_distribution": emotion_dist,
             "vad_distribution": vad_dist,
+            "superlatives": superlatives,
         }
 
         # Save results
