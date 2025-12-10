@@ -19,7 +19,7 @@ from core import (
     get_input_trajectory,
     find_books_by_emotion_preferences,
 )
-from recommender import recommend
+from recommender import recommend, WEIGHT_PRESETS, get_weight_preset
 
 # Page config
 st.set_page_config(
@@ -472,8 +472,26 @@ def show_book_analysis_and_recommendations():
 
     # Number of recommendations slider (shown if trajectories are available)
     top_n = 10
+    rec_preset = "balanced"
     if trajectories_available:
         top_n = st.slider("Number of recommendations", 5, 20, 10, key="rec_slider")
+
+        # Recommendation preset selector
+        preset_options = {
+            "balanced": "🎯 Balanced (default)",
+            "similar_experience": "📖 Similar Reading Experience",
+            "similar_themes": "💡 Similar Themes & Topics",
+            "similar_style": "✍️ Similar Writing Style",
+            "genre_focused": "📚 Same Genre/Category",
+        }
+        rec_preset = st.selectbox(
+            "Recommendation focus",
+            options=list(preset_options.keys()),
+            format_func=lambda x: preset_options[x],
+            index=0,
+            key="rec_preset",
+            help="Choose what aspect of similarity to emphasize",
+        )
 
     # Option to compute topics
     compute_topics = st.checkbox(
@@ -720,9 +738,15 @@ def show_book_analysis_and_recommendations():
                                     liked_trajectory_aligned
                                 )
 
-                            # Get recommendations
+                            # Get recommendations with preset and metadata for genre similarity
+                            metadata_df = load_metadata(spark)
                             recommendations = recommend(
-                                spark, all_trajectories, liked_id, top_n=top_n
+                                spark,
+                                all_trajectories,
+                                liked_id,
+                                top_n=top_n,
+                                metadata_df=metadata_df,
+                                preset=rec_preset,
                             )
 
                             # Display recommendations

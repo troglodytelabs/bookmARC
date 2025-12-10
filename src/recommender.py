@@ -3,6 +3,8 @@ Recommendation system based on emotion trajectory similarity.
 - Uses per-book normalized emotion scores (z-scores and ratios) for better comparison
 - Emotion ratios make books of different lengths/intensities comparable
 - Z-scores highlight what makes each book emotionally distinctive
+- Supports genre/subject metadata for improved recommendations
+- Configurable weight presets for different use cases
 """
 
 from pyspark.sql import SparkSession, Window
@@ -16,8 +18,72 @@ from pyspark.sql.functions import (
     max as spark_max,
     row_number,
     coalesce,
+    lower,
+    when,
+    size,
+    array_intersect,
+    split,
 )
-from pyspark.sql.types import DoubleType
+from pyspark.sql.types import DoubleType, ArrayType, StringType
+
+
+# Weight presets for different use cases
+WEIGHT_PRESETS = {
+    "similar_experience": {
+        # For finding books with similar emotional journey/reading experience
+        "feature_weight": 0.3,
+        "trajectory_weight": 0.35,
+        "embedding_weight": 0.15,
+        "topic_weight": 0.1,
+        "genre_weight": 0.1,
+    },
+    "similar_themes": {
+        # For finding books with similar themes/topics
+        "feature_weight": 0.2,
+        "trajectory_weight": 0.1,
+        "embedding_weight": 0.25,
+        "topic_weight": 0.35,
+        "genre_weight": 0.1,
+    },
+    "similar_style": {
+        # For finding books with similar writing style
+        "feature_weight": 0.2,
+        "trajectory_weight": 0.15,
+        "embedding_weight": 0.4,
+        "topic_weight": 0.15,
+        "genre_weight": 0.1,
+    },
+    "genre_focused": {
+        # For finding books in similar genres
+        "feature_weight": 0.25,
+        "trajectory_weight": 0.15,
+        "embedding_weight": 0.1,
+        "topic_weight": 0.1,
+        "genre_weight": 0.4,
+    },
+    "balanced": {
+        # Default balanced approach
+        "feature_weight": 0.3,
+        "trajectory_weight": 0.2,
+        "embedding_weight": 0.15,
+        "topic_weight": 0.15,
+        "genre_weight": 0.2,
+    },
+}
+
+
+def get_weight_preset(preset_name: str = "balanced") -> dict:
+    """
+    Get weight configuration for a specific use case.
+
+    Args:
+        preset_name: One of 'similar_experience', 'similar_themes',
+                    'similar_style', 'genre_focused', 'balanced'
+
+    Returns:
+        Dictionary with weight values
+    """
+    return WEIGHT_PRESETS.get(preset_name, WEIGHT_PRESETS["balanced"])
 
 
 def compute_feature_similarity(
@@ -169,6 +235,7 @@ def compute_feature_similarity(
             "avg_trust",
             "avg_valence",
             "avg_arousal",
+            "avg_dominance",
         ]
         if "emotion_trajectory" in other_books.columns:
             select_cols.append("emotion_trajectory")
@@ -502,39 +569,185 @@ def compute_topic_similarity_df(
     return topic_sim_df
 
 
+def compute_genre_similarity_df(
+    spark: SparkSession,
+    trajectory_df,
+    metadata_df,
+    liked_book_id: str,
+):
+    """
+    Compute genre/subject-based similarity using Gutenberg metadata.
+
+    Uses Bookshelves and Subjects columns from metadata to find similar books.
+    Jaccard similarity on the set of genres/subjects.
+
+    Args:
+        spark: SparkSession
+        trajectory_df: DataFrame with book trajectories
+        metadata_df: DataFrame with Gutenberg metadata (must have Bookshelves, Subjects)
+        liked_book_id: Book ID that user likes
+
+    Returns:
+        DataFrame with genre_similarity column
+    """
+    # Check if metadata has required columns
+    if metadata_df is None:
+        return spark.createDataFrame(
+            [], schema="book_id STRING, genre_similarity DOUBLE"
+        )
+
+    required_cols = ["Etext Number", "Bookshelves", "Subjects"]
+    if not all(c in metadata_df.columns for c in required_cols):
+        return spark.createDataFrame(
+            [], schema="book_id STRING, genre_similarity DOUBLE"
+        )
+
+    # Prepare metadata - combine bookshelves and subjects into genre tags
+    genre_df = metadata_df.select(
+        col("Etext Number").alias("book_id"), col("Bookshelves"), col("Subjects")
+    )
+
+    # Get liked book's genres
+    liked_genres = genre_df.filter(col("book_id") == liked_book_id).first()
+    if not liked_genres:
+        return spark.createDataFrame(
+            [], schema="book_id STRING, genre_similarity DOUBLE"
+        )
+
+    liked_bookshelves = liked_genres["Bookshelves"] or ""
+    liked_subjects = liked_genres["Subjects"] or ""
+
+    # Combine and normalize genre tags
+    def parse_genres(bookshelves, subjects):
+        """Parse and normalize genre tags."""
+        tags = set()
+
+        # Parse bookshelves (semicolon separated)
+        if bookshelves:
+            for shelf in str(bookshelves).split(";"):
+                shelf = shelf.strip().lower()
+                if shelf and shelf != "browsing: fiction":  # Too generic
+                    tags.add(shelf)
+
+        # Parse subjects (semicolon separated)
+        if subjects:
+            for subj in str(subjects).split(";"):
+                subj = subj.strip().lower()
+                # Extract key genre terms
+                if "fiction" in subj and subj != "fiction":
+                    tags.add(subj)
+                elif "horror" in subj:
+                    tags.add("horror")
+                elif "science fiction" in subj:
+                    tags.add("science fiction")
+                elif "fantasy" in subj:
+                    tags.add("fantasy")
+                elif "romance" in subj:
+                    tags.add("romance")
+                elif "mystery" in subj or "detective" in subj:
+                    tags.add("mystery")
+                elif "adventure" in subj:
+                    tags.add("adventure")
+                elif "children" in subj or "juvenile" in subj:
+                    tags.add("children's literature")
+                elif "historical" in subj:
+                    tags.add("historical fiction")
+
+        return list(tags)
+
+    liked_tags = set(parse_genres(liked_bookshelves, liked_subjects))
+
+    if not liked_tags:
+        return spark.createDataFrame(
+            [], schema="book_id STRING, genre_similarity DOUBLE"
+        )
+
+    # Create UDF for genre similarity (Jaccard)
+    def genre_sim_func(bookshelves, subjects):
+        if not bookshelves and not subjects:
+            return 0.0
+
+        other_tags = set(parse_genres(bookshelves, subjects))
+        if not other_tags:
+            return 0.0
+
+        # Jaccard similarity
+        intersection = len(liked_tags & other_tags)
+        union = len(liked_tags | other_tags)
+
+        if union == 0:
+            return 0.0
+
+        return float(intersection / union)
+
+    genre_sim_udf = udf(genre_sim_func, DoubleType())
+
+    # Compute genre similarity for all books
+    genre_sim_df = (
+        genre_df.filter(col("book_id") != liked_book_id)
+        .withColumn(
+            "genre_similarity", genre_sim_udf(col("Bookshelves"), col("Subjects"))
+        )
+        .select("book_id", "genre_similarity")
+    )
+
+    return genre_sim_df
+
+
 def recommend(
     spark: SparkSession,
     trajectory_df,
     liked_book_id: str,
     top_n: int = 10,
-    feature_weight: float = 0.4,
+    feature_weight: float = 0.3,
     trajectory_weight: float = 0.2,
-    embedding_weight: float = 0.2,
-    topic_weight: float = 0.2,
+    embedding_weight: float = 0.15,
+    topic_weight: float = 0.15,
+    genre_weight: float = 0.2,
+    metadata_df=None,
+    preset: str = None,
 ):
     """
     Recommend books with similar emotion trajectories.
 
     Combines multiple similarity metrics:
     - Feature-based similarity (emotion and VAD features)
-    - Trajectory similarity (emotion sequences)
+    - Trajectory similarity (emotion sequences - now normalized)
     - Embedding similarity (semantic word embeddings)
     - Topic similarity (LDA topic distributions)
+    - Genre similarity (Gutenberg bookshelves/subjects)
 
     Args:
         spark: SparkSession
         trajectory_df: DataFrame with book trajectories
         liked_book_id: Book ID that user likes
         top_n: Number of recommendations
-        feature_weight: Weight for feature-based similarity (default: 0.4)
+        feature_weight: Weight for emotion/VAD features (default: 0.3)
         trajectory_weight: Weight for trajectory similarity (default: 0.2)
-        embedding_weight: Weight for embedding similarity (default: 0.2)
-        topic_weight: Weight for topic similarity (default: 0.2)
+        embedding_weight: Weight for embedding similarity (default: 0.15)
+        topic_weight: Weight for topic similarity (default: 0.15)
+        genre_weight: Weight for genre/subject similarity (default: 0.2)
+        metadata_df: DataFrame with Gutenberg metadata (for genre similarity)
+        preset: Use a predefined weight configuration. Options:
+                'similar_experience' - emphasize emotional journey
+                'similar_themes' - emphasize topics
+                'similar_style' - emphasize writing style (embeddings)
+                'genre_focused' - emphasize genre matching
+                'balanced' - default balanced approach
         Note: weights are normalized to sum to 1.0
 
     Returns:
         DataFrame with recommended books and similarity scores
     """
+    # Apply preset if specified
+    if preset:
+        weights = get_weight_preset(preset)
+        feature_weight = weights["feature_weight"]
+        trajectory_weight = weights["trajectory_weight"]
+        embedding_weight = weights["embedding_weight"]
+        topic_weight = weights["topic_weight"]
+        genre_weight = weights["genre_weight"]
+
     # Remove duplicates (same book_id) - keep first occurrence
     window = Window.partitionBy("book_id").orderBy("book_id")
     trajectory_df = (
@@ -544,12 +757,19 @@ def recommend(
     )
 
     # Normalize weights
-    total_weight = feature_weight + trajectory_weight + embedding_weight + topic_weight
+    total_weight = (
+        feature_weight
+        + trajectory_weight
+        + embedding_weight
+        + topic_weight
+        + genre_weight
+    )
     if total_weight > 0:
         feature_weight = feature_weight / total_weight
         trajectory_weight = trajectory_weight / total_weight
         embedding_weight = embedding_weight / total_weight
         topic_weight = topic_weight / total_weight
+        genre_weight = genre_weight / total_weight
 
     # Get liked book
     liked_book = trajectory_df.filter(col("book_id") == liked_book_id).collect()
@@ -644,6 +864,15 @@ def recommend(
             combined_df = combined_df.join(topic_sim_df, on="book_id", how="outer")
             combined_df = combined_df.fillna(0.0, subset=["topic_similarity"])
 
+    # Compute genre similarity if metadata available
+    if metadata_df is not None and genre_weight > 0:
+        genre_sim_df = compute_genre_similarity_df(
+            spark, trajectory_df, metadata_df, liked_book_id
+        )
+        if genre_sim_df.count() > 0:
+            combined_df = combined_df.join(genre_sim_df, on="book_id", how="outer")
+            combined_df = combined_df.fillna(0.0, subset=["genre_similarity"])
+
     # Compute combined similarity: weighted average of all available metrics
     # Start with feature similarity as base
     similarity_expr = feature_weight * col("feature_similarity")
@@ -664,6 +893,10 @@ def recommend(
     if "topic_similarity" in combined_df.columns:
         similarity_expr = similarity_expr + (topic_weight * col("topic_similarity"))
 
+    # Add genre similarity if available
+    if "genre_similarity" in combined_df.columns:
+        similarity_expr = similarity_expr + (genre_weight * col("genre_similarity"))
+
     # Compute final similarity
     combined_df = combined_df.withColumn("similarity", similarity_expr)
 
@@ -683,6 +916,7 @@ def recommend(
         "avg_trust",
         "avg_valence",
         "avg_arousal",
+        "avg_dominance",
     ]
 
     # Include emotion_trajectory for visualization if available
