@@ -120,6 +120,7 @@ def load_and_chunk_books(
     num_chunks: int = 20,
     language: str = "en",
     limit: int = None,
+    book_ids: list = None,
 ):
     """
     Load books and create chunks in a single optimized pipeline.
@@ -156,12 +157,16 @@ def load_and_chunk_books(
         col("book_id").isNotNull() & (col("book_id") != "")
     )
 
-    if limit:
+    if book_ids:
+        metadata_df = metadata_df.filter(col("book_id").isin(book_ids))
+    elif limit:
         metadata_df = metadata_df.limit(limit)
 
     # Collect target book IDs for filtering (before reading files)
     target_book_ids = None
-    if limit:
+    if book_ids:
+        target_book_ids = book_ids
+    elif limit:
         target_book_ids = [
             row.book_id for row in metadata_df.select("book_id").collect()
         ]

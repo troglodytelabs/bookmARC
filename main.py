@@ -9,6 +9,7 @@ import json
 from datetime import datetime
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col
+from pyspark import StorageLevel
 
 # Add src to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
@@ -134,6 +135,125 @@ def create_spark_session(app_name: str = "EmoArc", mode: str = "local"):
     return spark
 
 
+def process_batch(
+    spark, batch_ids, batch_index, args, emotion_df, vad_df, models, timings
+):
+    """
+    Process a single batch of books.
+
+    Args:
+        spark: SparkSession
+        batch_ids: List of book IDs to process
+        batch_index: Index of the current batch (0-based)
+        args: Command line arguments
+        emotion_df: Loaded emotion lexicon
+        vad_df: Loaded VAD lexicon
+        models: Dictionary of existing models (word2vec, lda, cv_model) or None
+        timings: Dictionary to update with timing info
+
+    Returns:
+        Updated models dictionary
+    """
+    batch_start = time.time()
+
+    # Step 1: Load and chunk books
+    print(f"\n[Batch {batch_index + 1}] Loading and chunking {len(batch_ids)} books...")
+    stage_start = time.time()
+    chunks_df = load_and_chunk_books(
+        spark,
+        args.books_dir,
+        args.metadata,
+        num_chunks=args.num_chunks,
+        language=args.language,
+        book_ids=batch_ids,
+    )
+    chunks_df.persist(StorageLevel.MEMORY_AND_DISK)
+    chunk_count = chunks_df.count()
+
+    if chunk_count == 0:
+        print(f"  ⚠ Batch {batch_index + 1} has no chunks. Skipping.")
+        chunks_df.unpersist()
+        return models
+
+    timings[f"batch_{batch_index}_load"] = time.time() - stage_start
+    print(f"  ✓ Created {chunk_count} chunks")
+
+    # Step 2: Score chunks
+    print(f"\n[Batch {batch_index + 1}] Scoring chunks...")
+    stage_start = time.time()
+    chunk_scores = score_chunks(spark, chunks_df, emotion_df, vad_df)
+
+    # Step 3: Analyze trajectories
+    print(f"\n[Batch {batch_index + 1}] Analyzing trajectories...")
+    trajectories = analyze_trajectory(spark, chunk_scores)
+    trajectories = trajectories.filter(col("num_chunks") > 0)
+    timings[f"batch_{batch_index}_score"] = time.time() - stage_start
+
+    # Step 4: Word Embeddings
+    book_embeddings = None
+    if not args.skip_embeddings:
+        print(f"\n[Batch {batch_index + 1}] Processing embeddings...")
+        stage_start = time.time()
+
+        if models.get("word2vec") is None:
+            print("  Training Word2Vec model (on this batch)...")
+            models["word2vec"] = train_word2vec(
+                spark, chunks_df, vector_size=args.vector_size, min_count=5
+            )
+
+        chunk_embeddings = compute_chunk_embeddings(
+            spark, chunks_df, models["word2vec"]
+        )
+        book_embeddings = compute_book_embedding(spark, chunk_embeddings)
+        timings[f"batch_{batch_index}_embeddings"] = time.time() - stage_start
+
+    # Step 5: Topic Modeling
+    book_topics = None
+    if not args.skip_topics:
+        print(f"\n[Batch {batch_index + 1}] Processing topics...")
+        stage_start = time.time()
+
+        if models.get("lda") is None:
+            print("  Preparing topic features and training LDA (on this batch)...")
+            feature_df, cv_model = prepare_topic_features(
+                spark, chunks_df, vocab_size=5000, min_df=2
+            )
+            models["cv_model"] = cv_model
+
+            lda_model = train_lda(
+                spark, feature_df, num_topics=args.num_topics, max_iter=50
+            )
+            models["lda"] = lda_model
+        else:
+            # Transform using existing CV model
+            word_sequences = chunks_df.select("book_id", "chunk_index", col("words"))
+            feature_df = models["cv_model"].transform(word_sequences)
+
+        chunk_topics = get_chunk_topics(spark, feature_df, models["lda"])
+        book_topics = compute_book_topics(spark, chunk_topics)
+        timings[f"batch_{batch_index}_topics"] = time.time() - stage_start
+
+    # Cleanup chunks
+    chunks_df.unpersist()
+    # chunk_scores is not persisted, so no need to unpersist
+
+    # Join results
+    if book_embeddings is not None:
+        trajectories = trajectories.join(book_embeddings, on="book_id", how="left")
+    if book_topics is not None:
+        trajectories = trajectories.join(book_topics, on="book_id", how="left")
+
+    # Save results
+    print(f"\n[Batch {batch_index + 1}] Saving results...")
+    stage_start = time.time()
+    mode = "overwrite" if batch_index == 0 else "append"
+    trajectories.write.mode(mode).parquet(f"{args.output}/trajectories")
+    timings[f"batch_{batch_index}_save"] = time.time() - stage_start
+
+    print(f"  ✓ Batch {batch_index + 1} complete in {time.time() - batch_start:.2f}s")
+    return models
+
+
 def main():
     """Main pipeline execution."""
     import argparse
@@ -212,6 +332,12 @@ def main():
         default="local",
         help="Spark execution mode: 'local' (default) or 'cluster' (for EMR/YARN)",
     )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        help="Process books in batches of this size to avoid OOM",
+    )
 
     args = parser.parse_args()
 
@@ -250,164 +376,58 @@ def main():
         print(f"  ✓ Loaded {vad_count} VAD terms")
         print(f"  ⏱ Time: {timings['1_lexicon_loading']:.2f}s")
 
-        # Step 2+3: Load books AND create chunks in optimized single pipeline
-        # This never materializes the full text column - goes directly from
-        # file content → words, which is much more memory efficient
-        print("\n[Step 2/6] Loading books and creating chunks...")
-        stage_start = time.time()
-        chunks_df = load_and_chunk_books(
-            spark,
-            args.books_dir,
-            args.metadata,
-            num_chunks=args.num_chunks,
-            language=args.language,
-            limit=args.limit,
+        # Determine books to process
+        print("\n[Step 2/6] Determining books to process...")
+        metadata_df = spark.read.option("header", "true").csv(args.metadata)
+        if args.language:
+            metadata_df = metadata_df.filter(col("Language") == args.language)
+
+        metadata_df = metadata_df.filter(
+            col("Etext Number").isNotNull() & (col("Etext Number") != "")
         )
-        # Use disk-based persistence instead of memory cache
-        # This allows Spark to spill to disk when memory is tight
-        from pyspark import StorageLevel
 
-        chunks_df.persist(StorageLevel.MEMORY_AND_DISK)
-        chunk_count = chunks_df.count()
-        book_count = chunks_df.select("book_id").distinct().count()
-        timings["2_text_preprocessing"] = time.time() - stage_start
-        print(f"  ✓ Loaded {book_count} books, created {chunk_count} chunks")
-        print(f"  ⏱ Time: {timings['2_text_preprocessing']:.2f}s")
+        if args.limit:
+            metadata_df = metadata_df.limit(args.limit)
 
-        # Step 4: Score chunks with emotions AND VAD in one pass
-        print("\n[Step 3/6] Scoring chunks with emotions and VAD...")
-        stage_start = time.time()
-        chunk_scores = score_chunks(spark, chunks_df, emotion_df, vad_df)
-        # Don't cache chunk_scores - let Spark pipeline it through to trajectories
+        all_book_ids = [
+            row["Etext Number"] for row in metadata_df.select("Etext Number").collect()
+        ]
 
-        # Step 5: Analyze trajectories
-        print("\n[Step 4/6] Analyzing emotion trajectories...")
-        trajectories = analyze_trajectory(spark, chunk_scores)
+        # Shuffle book IDs to ensure the first batch (used for training) is representative
+        import random
 
-        # Filter out books with no chunks (shouldn't happen, but safety check)
-        trajectories = trajectories.filter(col("num_chunks") > 0)
-        trajectory_count = trajectories.count()
-        timings["3_emotion_scoring_and_trajectories"] = time.time() - stage_start
-        print(f"  ✓ Analyzed {trajectory_count} book trajectories")
-        print(f"  ⏱ Time: {timings['3_emotion_scoring_and_trajectories']:.2f}s")
+        random.seed(42)  # For reproducibility
+        random.shuffle(all_book_ids)
 
-        # Step 5: Compute word embeddings and topic distributions
-        # Note: Embeddings and topics are computed at BOOK level for recommendations
-        # (chunk-level is aggregated to book-level)
-        book_embeddings = None
-        book_topics = None
+        print(f"  ✓ Found {len(all_book_ids)} books to process (shuffled)")
 
-        if not args.skip_embeddings:
-            print("\n[Step 5a/5] Computing word embeddings...")
-            stage_start = time.time()
-            # Reuse persisted chunks_df
-            print("  Training Word2Vec model...")
-            word2vec_model = train_word2vec(
-                spark, chunks_df, vector_size=args.vector_size, min_count=5
+        # Process in batches
+        models = {}
+        batch_size = args.batch_size if args.batch_size else len(all_book_ids)
+
+        for i in range(0, len(all_book_ids), batch_size):
+            batch_ids = all_book_ids[i : i + batch_size]
+            batch_index = i // batch_size
+
+            models = process_batch(
+                spark, batch_ids, batch_index, args, emotion_df, vad_df, models, timings
             )
-            print("  ✓ Word2Vec model trained")
-
-            print("  Computing chunk embeddings...")
-            chunk_embeddings = compute_chunk_embeddings(
-                spark, chunks_df, word2vec_model
-            )
-            # Use disk-based persistence for intermediate results
-            chunk_embeddings.persist(StorageLevel.MEMORY_AND_DISK)
-            emb_count = chunk_embeddings.count()
-            print(f"  ✓ Computed embeddings for {emb_count} chunks")
-
-            print("  Aggregating to book-level embeddings...")
-            book_embeddings = compute_book_embedding(spark, chunk_embeddings)
-            book_emb_count = book_embeddings.count()
-            timings["4_word_embeddings"] = time.time() - stage_start
-            print(f"  ✓ Computed embeddings for {book_emb_count} books")
-            print(f"  ⏱ Time: {timings['4_word_embeddings']:.2f}s")
-
-            chunk_embeddings.unpersist()
-        else:
-            print("\n[Step 5a/5] Skipping word embeddings (--skip-embeddings)")
-            timings["4_word_embeddings"] = 0
-
-        if not args.skip_topics:
-            print("\n[Step 5b/5] Computing topic distributions...")
-            stage_start = time.time()
-            # Reuse persisted chunks_df
-            print("  Preparing topic features...")
-            feature_df, cv_model = prepare_topic_features(
-                spark, chunks_df, vocab_size=5000, min_df=2
-            )
-            feature_df.persist(StorageLevel.MEMORY_AND_DISK)
-            print("  ✓ Features prepared")
-
-            print(f"  Training LDA model with {args.num_topics} topics...")
-            lda_model = train_lda(
-                spark, feature_df, num_topics=args.num_topics, max_iter=50
-            )
-            print("  ✓ LDA model trained")
-
-            print("  Computing chunk topics...")
-            chunk_topics = get_chunk_topics(spark, feature_df, lda_model)
-            chunk_topics.persist(StorageLevel.MEMORY_AND_DISK)
-            chunk_topic_count = chunk_topics.count()
-            print(f"  ✓ Computed topics for {chunk_topic_count} chunks")
-
-            print("  Aggregating to book-level topics...")
-            book_topics = compute_book_topics(spark, chunk_topics)
-            topic_count = book_topics.count()
-            timings["5_topic_modeling"] = time.time() - stage_start
-            print(f"  ✓ Computed topics for {topic_count} books")
-            print(f"  ⏱ Time: {timings['5_topic_modeling']:.2f}s")
-
-            feature_df.unpersist()
-            chunk_topics.unpersist()
-        else:
-            print("\n[Step 6b/6] Skipping topic modeling (--skip-topics)")
-            timings["5_topic_modeling"] = 0
-
-        # Now unpersist chunks_df as all processing is complete
-        chunks_df.unpersist()
-        chunk_scores.unpersist()
-
-        # Join embeddings and topics with trajectories
-        if book_embeddings is not None:
-            trajectories = trajectories.join(book_embeddings, on="book_id", how="left")
-            print("  ✓ Joined embeddings with trajectories")
-
-        if book_topics is not None:
-            trajectories = trajectories.join(book_topics, on="book_id", how="left")
-            print("  ✓ Joined topics with trajectories")
-
-        if args.limit and trajectory_count < args.limit:
-            print(
-                f"  ⚠ Warning: Expected {args.limit} books but got {trajectory_count}"
-            )
-            print("  Some books may have had no chunks or processing errors.")
-
-        # Save results as Parquet (efficient columnar format with full type support)
-        # Only save trajectories - chunk_scores are intermediate and not needed for recommendations
-        print(f"\n[Saving] Writing results to {args.output}/...")
-        stage_start = time.time()
-
-        # Save trajectories (includes embeddings, topics, emotion trajectories)
-        # This is the only file needed for recommendations
-        trajectories.write.mode("overwrite").parquet(f"{args.output}/trajectories")
-        timings["6_save_results"] = time.time() - stage_start
-        print(f"  ✓ Trajectories saved to {args.output}/trajectories")
-        print(f"  ⏱ Time: {timings['6_save_results']:.2f}s")
-
-        print("  ✓ Results saved successfully!")
 
         # Calculate total time
         timings["total"] = time.time() - pipeline_start
 
-        # Show sample results
+        # Show sample results (read from disk since we processed in batches)
         print("\n" + "=" * 80)
         print("Sample Results:")
         print("=" * 80)
-        print("\nTop 10 books by average joy:")
-        trajectories.orderBy(col("avg_joy").desc()).select(
-            "book_id", "title", "author", "avg_joy", "avg_sadness", "avg_valence"
-        ).show(10, truncate=False)
+        try:
+            trajectories = spark.read.parquet(f"{args.output}/trajectories")
+            print("\nTop 10 books by average joy:")
+            trajectories.orderBy(col("avg_joy").desc()).select(
+                "book_id", "title", "author", "avg_joy", "avg_sadness", "avg_valence"
+            ).show(10, truncate=False)
+        except Exception as e:
+            print(f"Could not read results for sample display: {e}")
 
         # Print timing summary
         print("\n" + "=" * 80)
