@@ -756,6 +756,47 @@ def recommend(
         .drop("rn")
     )
 
+    # Get liked book first to check available features
+    liked_book = trajectory_df.filter(col("book_id") == liked_book_id).collect()
+    if not liked_book:
+        return spark.createDataFrame([], trajectory_df.schema)
+
+    liked_row = liked_book[0]
+
+    # Check which features are available for the liked book
+    has_trajectory = False
+    if "emotion_trajectory" in trajectory_df.columns:
+        try:
+            traj_value = liked_row["emotion_trajectory"]
+            has_trajectory = traj_value is not None
+        except (KeyError, AttributeError):
+            has_trajectory = False
+
+    has_embedding = False
+    if "book_embedding" in trajectory_df.columns:
+        try:
+            emb_value = liked_row["book_embedding"]
+            has_embedding = emb_value is not None
+        except (KeyError, AttributeError):
+            has_embedding = False
+
+    has_topics = False
+    if "book_topics" in trajectory_df.columns:
+        try:
+            topic_value = liked_row["book_topics"]
+            has_topics = topic_value is not None
+        except (KeyError, AttributeError):
+            has_topics = False
+
+    # Adjust weights based on availability
+    # If a feature is missing for the liked book, set its weight to 0
+    if not has_trajectory:
+        trajectory_weight = 0.0
+    if not has_embedding:
+        embedding_weight = 0.0
+    if not has_topics:
+        topic_weight = 0.0
+
     # Normalize weights
     total_weight = (
         feature_weight
@@ -770,20 +811,6 @@ def recommend(
         embedding_weight = embedding_weight / total_weight
         topic_weight = topic_weight / total_weight
         genre_weight = genre_weight / total_weight
-
-    # Get liked book
-    liked_book = trajectory_df.filter(col("book_id") == liked_book_id).collect()
-    if not liked_book:
-        return spark.createDataFrame([], trajectory_df.schema)
-
-    liked_row = liked_book[0]
-    has_trajectory = False
-    if "emotion_trajectory" in trajectory_df.columns:
-        try:
-            traj_value = liked_row["emotion_trajectory"]
-            has_trajectory = traj_value is not None
-        except (KeyError, AttributeError):
-            has_trajectory = False
 
     # Compute feature-based similarity (always available)
     feature_sim_df = compute_feature_similarity(spark, trajectory_df, liked_book_id)
